@@ -3,10 +3,12 @@ import type { NPC } from "./api";
 
 export type DialogueLine = { from: "player" | "npc" | "system"; text: string; source?: string };
 
-export function DialogueOverlay({ npc, lines, busy, onClose, onSend }: {
+export function DialogueOverlay({ npc, lines, busy, context, impression, onClose, onSend }: {
   npc: NPC;
   lines: DialogueLine[];
   busy: boolean;
+  context: string;
+  impression: string;
   onClose: () => void;
   onSend: (message: string) => Promise<void>;
 }) {
@@ -24,7 +26,7 @@ export function DialogueOverlay({ npc, lines, busy, onClose, onSend }: {
       <div className="dialogue-vignette" />
       <button className="dialogue-close" onClick={onClose}>结束交谈 ×</button>
       <div className={`dialogue-portrait resident-art resident-${npc.id}`} />
-      <div className="dialogue-scene-label"><span>LOCATION</span><p>{npc.profile.role} · {npc.state.mood}</p></div>
+      <div className="dialogue-scene-label"><span>HERE / NOW</span><p>{context}</p></div>
       <div className="dialogue-box">
         <header><strong>{npc.profile.name}</strong><span>{npc.profile.codename}</span><small>{latestNpc?.source ?? npc.state.action.source}</small></header>
         <div className="dialogue-copy">
@@ -32,6 +34,7 @@ export function DialogueOverlay({ npc, lines, busy, onClose, onSend }: {
           {busy && <b className="type-caret" />}
         </div>
         <div className="dialogue-history">
+          <p className="impression"><span>TA 眼中的你</span>{impression}</p>
           {lines.slice(-5, -1).map((line, index) => <p key={index} className={line.from}><span>{line.from === "player" ? "你" : line.from === "npc" ? npc.profile.name : "系统"}</span>{line.text}</p>)}
         </div>
         <form onSubmit={submit}>

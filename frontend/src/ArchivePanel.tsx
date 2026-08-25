@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { NPC } from "./api";
+import type { InventoryItem, NPC, PlayerRelationship } from "./api";
 
 type Tab = "profile" | "memory" | "relations";
 
@@ -16,11 +16,15 @@ function timeLabel(minute: number) {
   return `${String(Math.floor(minute / 60)).padStart(2, "0")}:00`;
 }
 
-export function ArchivePanel({ npc, residents, onClose, onTalk }: {
+export function ArchivePanel({ npc, residents, playerRelation, pocket, canTalk, onClose, onTalk, onGift }: {
   npc: NPC;
   residents: NPC[];
+  playerRelation: PlayerRelationship;
+  pocket: InventoryItem[];
+  canTalk: boolean;
   onClose: () => void;
   onTalk: () => void;
+  onGift: (itemId: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>("profile");
   useEffect(() => setTab("profile"), [npc.id]);
@@ -60,6 +64,7 @@ export function ArchivePanel({ npc, residents, onClose, onTalk }: {
             {[...npc.memory.diary].reverse().map((memory, index) => <article className="diary-entry" key={`${memory}-${index}`}>{memory}</article>)}
           </>}
           {tab === "relations" && <>
+            <article className="player-impression"><small>TA 眼中的你</small><header><b>外来者</b><span>{playerRelation.affinity}</span></header><i><b style={{ width: `${Math.max(0, playerRelation.affinity)}%` }} /></i><p>{playerRelation.impression}</p></article>
             <p className="tab-caption">RELATION MAP / 对他人的印象</p>
             {Object.entries(npc.relationships).map(([id, relation]) => {
               const other = residents.find((resident) => resident.id === id);
@@ -67,7 +72,8 @@ export function ArchivePanel({ npc, residents, onClose, onTalk }: {
             })}
           </>}
         </div>
-        <button className="talk-button" onClick={onTalk}><span>和{npc.profile.name}说话</span><b>进入剧情 →</b></button>
+        {pocket.length > 0 && <div className="archive-gifts"><small>从口袋送出</small>{pocket.map((item) => <button key={item.id} onClick={() => onGift(item.id)}>{item.symbol} {item.name}</button>)}</div>}
+        <button className="talk-button" onClick={onTalk} disabled={!canTalk}><span>{canTalk ? `和${npc.profile.name}说话` : "要走近才能交谈"}</span><b>{canTalk ? "进入剧情 →" : "回到场景"}</b></button>
       </div>
     </aside>
   );

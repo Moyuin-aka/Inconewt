@@ -11,7 +11,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .ai import AIService
-from .models import ChatRequest, ChatResponse, NPC, WorldActionRequest, WorldSnapshot
+from .models import (
+    BoardPostRequest,
+    ChatRequest,
+    ChatResponse,
+    GiftRequest,
+    NPC,
+    PlayerAppearanceRequest,
+    PlayerMoveRequest,
+    ScavengeRequest,
+    WeatherWishRequest,
+    WorldActionRequest,
+    WorldSnapshot,
+)
 from .store import WorldStore
 from .world import WorldEngine
 
@@ -39,7 +51,7 @@ async def lifespan(app: FastAPI):
         store.close()
 
 
-app = FastAPI(title="Inconnewt API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Inconnewt API", version="0.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -82,6 +94,8 @@ async def chat(npc_id: str, request: ChatRequest) -> ChatResponse:
         return await engine().chat(npc_id, request.message)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="NPC 不存在") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @app.post("/api/chat/{npc_id}/stream")
@@ -91,9 +105,18 @@ async def chat_stream(npc_id: str, request: ChatRequest) -> StreamingResponse:
         response = await engine().chat(npc_id, request.message)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="NPC 不存在") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     async def generate():
-        meta = {"type": "meta", "source": response.source, "fallback_reason": response.fallback_reason}
+        meta = {
+            "type": "meta",
+            "source": response.source,
+            "fallback_reason": response.fallback_reason,
+            "affinity_delta": response.affinity_delta,
+            "impression": response.impression,
+            "completed_quest_id": response.completed_quest_id,
+        }
         yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
         for character in response.reply:
             yield f"data: {json.dumps({'type': 'delta', 'delta': character}, ensure_ascii=False)}\n\n"
@@ -109,6 +132,69 @@ async def world_action(request: WorldActionRequest) -> WorldSnapshot:
         return await engine().apply_world_action(request)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="NPC 不存在") from exc
+
+
+@app.post("/api/player/move", response_model=WorldSnapshot)
+async def move_player(request: PlayerMoveRequest) -> WorldSnapshot:
+    try:
+        return await engine().move_player(request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="地点不存在") from exc
+
+
+@app.post("/api/player/appearance", response_model=WorldSnapshot)
+async def set_player_appearance(request: PlayerAppearanceRequest) -> WorldSnapshot:
+    return await engine().set_player_appearance(request)
+
+
+@app.post("/api/quests/{quest_id}/accept", response_model=WorldSnapshot)
+async def accept_quest(quest_id: str) -> WorldSnapshot:
+    try:
+        return await engine().accept_quest(quest_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="心愿不存在") from exc
+
+
+@app.post("/api/player/scavenge", response_model=WorldSnapshot)
+async def scavenge(request: ScavengeRequest) -> WorldSnapshot:
+    try:
+        return await engine().scavenge(request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="拾取点不存在") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/player/gift", response_model=WorldSnapshot)
+async def gift(request: GiftRequest) -> WorldSnapshot:
+    try:
+        return await engine().gift(request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="居民或物品不存在") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/board", response_model=WorldSnapshot)
+async def post_board(request: BoardPostRequest) -> WorldSnapshot:
+    try:
+        return await engine().post_board(request.text)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.post("/api/wish-weather", response_model=WorldSnapshot)
+async def wish_weather(request: WeatherWishRequest) -> WorldSnapshot:
+    try:
+        return await engine().wish_weather(request)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/world/save")

@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from .ai import AIService
 from .models import (
     ActionRecord,
+    CarriedMessage,
     ChatResponse,
+    GiftRequest,
+    JournalSecret,
     NPC,
     NPCAction,
+    PlayerAppearanceRequest,
+    PlayerMoveRequest,
     Relationship,
+    ScavengeRequest,
+    WeatherWishRequest,
+    WishQuest,
     WorldActionRequest,
     WorldEvent,
     WorldSnapshot,
@@ -52,7 +61,7 @@ class WorldEngine:
         loaded = store.load_current()
         self.world = loaded or initial_world()
         if (
-            self.world.schema_version < 2
+            self.world.schema_version < 3
             or len(self.world.npcs) < 4
             or any(not npc.plan.items for npc in self.world.npcs)
         ):
@@ -118,6 +127,8 @@ class WorldEngine:
                 await self.events.publish(event)
 
             await self._maybe_interaction()
+            await self._maybe_player_greeting()
+            await self._ensure_quest_pool()
             await self._summarize_full_memories()
             self._touch_and_persist()
             return self.snapshot()
@@ -125,16 +136,152 @@ class WorldEngine:
     async def chat(self, npc_id: str, message: str) -> ChatResponse:
         async with self.lock:
             npc = self.get_npc(npc_id)
-            reply, source, fallback = await self.ai.chat(npc, message, self.world)
+            if not self._player_near_npc(npc):
+                raise PermissionError("要走近居民才能交谈")
+            reply, source, fallback, affinity_delta, impression = await self.ai.chat(npc, message, self.world)
             self._remember(npc, f"玩家说：{message}")
             self._remember(npc, f"{npc.profile.name}回答：{reply}")
+            relation = self.world.player.relationships.setdefault(npc.id, Relationship(affinity=0, impression="仍是陌生人。"))
+            relation.affinity = max(-100, min(100, relation.affinity + affinity_delta))
+            relation.impression = impression
             npc.state.needs.social = max(0, npc.state.needs.social - 18)
             npc.state.mood = "被理解"
-            event = self._event("chat", f"{self._period()}，你在{self._location_name(npc.state.location)}与{npc.profile.name}聊了一会儿。", [npc.id])
+            completed = self._complete_quest_from_chat(npc)
+            event = self._event("chat", f"{self._period()}，你在{self._location_name(npc.state.location)}与{npc.profile.name}聊了一会儿。TA 对你的印象有了变化。", [npc.id])
             self._append_event(event)
             self._touch_and_persist()
             await self.events.publish(event)
-            return ChatResponse(reply=reply, source=source, fallback_reason=fallback)
+            if completed:
+                await self.events.publish(completed[1])
+            return ChatResponse(
+                reply=reply, source=source, fallback_reason=fallback,
+                affinity_delta=affinity_delta, impression=impression,
+                completed_quest_id=completed[0].id if completed else None,
+            )
+
+    async def move_player(self, request: PlayerMoveRequest) -> WorldSnapshot:
+        async with self.lock:
+            if request.location not in {item.id for item in self.world.locations}:
+                raise KeyError(request.location)
+            self.world.player.x = request.x
+            self.world.player.y = request.y
+            self.world.player.location = request.location
+            self._touch_and_persist()
+            return self.snapshot()
+
+    async def set_player_appearance(self, request: PlayerAppearanceRequest) -> WorldSnapshot:
+        async with self.lock:
+            self.world.player.appearance = request.appearance
+            self._touch_and_persist()
+            return self.snapshot()
+
+    async def accept_quest(self, quest_id: str) -> WorldSnapshot:
+        async with self.lock:
+            quest = self._get_quest(quest_id)
+            if quest.status == "completed":
+                return self.snapshot()
+            quest.status = "accepted"
+            if quest.type == "message" and quest.target_npc_id and quest.message:
+                if not any(item.quest_id == quest.id for item in self.world.player.carried_messages):
+                    self.world.player.carried_messages.append(CarriedMessage(
+                        id=f"message-{quest.id}", quest_id=quest.id, from_npc_id=quest.giver_id,
+                        to_npc_id=quest.target_npc_id, text=quest.message,
+                    ))
+            giver = self.get_npc(quest.giver_id)
+            text = f"{self._period()}，你答应帮{giver.profile.name}完成心愿「{quest.title}」。"
+            event = self._event("quest_accepted", text, [quest.giver_id])
+            self._append_event(event)
+            self._touch_and_persist()
+            await self.events.publish(event)
+            return self.snapshot()
+
+    async def scavenge(self, request: ScavengeRequest) -> WorldSnapshot:
+        async with self.lock:
+            point = next((item for item in self.world.scavenge_points if item.id == request.point_id), None)
+            if not point:
+                raise KeyError(request.point_id)
+            if not point.available:
+                raise ValueError("这里已经找过了")
+            if self.world.player.location != point.location:
+                raise PermissionError("要走到拾取点附近")
+            if math.hypot(self.world.player.x - point.x, self.world.player.y - point.y) > 155:
+                raise PermissionError("再靠近一点才能看清这里的东西")
+            if len(self.world.player.pocket) >= 4:
+                raise ValueError("口袋只有四格，已经装满了")
+            self.world.player.pocket.append(point.item.model_copy(deep=True))
+            point.available = False
+            event = self._event("item_found", f"{self._period()}，你在{self._location_name(point.location)}找到「{point.item.name}」。")
+            self._append_event(event)
+            self._touch_and_persist()
+            await self.events.publish(event)
+            return self.snapshot()
+
+    async def gift(self, request: GiftRequest) -> WorldSnapshot:
+        async with self.lock:
+            npc = self.get_npc(request.npc_id)
+            if not self._player_near_npc(npc):
+                raise PermissionError("要走近居民才能送出物品")
+            index = next((i for i, item in enumerate(self.world.player.pocket) if item.id == request.item_id), None)
+            if index is None:
+                raise KeyError(request.item_id)
+            quest = next((item for item in self.world.quests if item.status != "completed" and item.required_item_id == request.item_id), None)
+            if quest:
+                if quest.status == "offered":
+                    raise ValueError(f"先在手记里记下心愿「{quest.title}」")
+                if quest.giver_id != npc.id:
+                    raise ValueError(f"这是要交给{self.get_npc(quest.giver_id).profile.name}的心愿物品")
+                completed = self._complete_quest_from_chat(npc)
+                if completed:
+                    self._touch_and_persist()
+                    await self.events.publish(completed[1])
+                    return self.snapshot()
+            item = self.world.player.pocket.pop(index)
+            relation = self.world.player.relationships.setdefault(npc.id, Relationship(affinity=0, impression="仍是陌生人。"))
+            relation.affinity = min(100, relation.affinity + 5)
+            relation.impression = f"会把找到的{item.name}送给我。"
+            self._remember(npc, f"外来者在{self._location_name(npc.state.location)}送给我：{item.name}。")
+            event = self._event("player_gift", f"{self._period()}，你把「{item.name}」交到{npc.profile.name}手里。", [npc.id])
+            self._append_event(event)
+            self._touch_and_persist()
+            await self.events.publish(event)
+            return self.snapshot()
+
+    async def post_board(self, text: str) -> WorldSnapshot:
+        async with self.lock:
+            if self.world.player.location != "square":
+                raise PermissionError("要走到中央广场的公告板前")
+            self.world.announcement = text
+            reactions = {
+                "momo": "莫莫读了两遍，像要把这句话收进某个抽屉。",
+                "lili": "利利在旁边添了一句：看完也要记得吃饭。",
+                "xiaoke": "小柯拿炭笔画了一个歪歪扭扭的齿轮当回应。",
+                "ajie": "阿羯从塔上确认过公告板，只点了一下头。",
+            }
+            event = self._event("board_post", f"公告板换上了你的字：「{text}」")
+            self._append_event(event)
+            await self.events.publish(event)
+            for npc in self.world.npcs:
+                self._remember(npc, f"外来者在公告板写道：{text}。{reactions[npc.id]}")
+                reaction = self._event("board_reaction", reactions[npc.id], [npc.id])
+                self._append_event(reaction)
+                await self.events.publish(reaction)
+            self._touch_and_persist()
+            return self.snapshot()
+
+    async def wish_weather(self, request: WeatherWishRequest) -> WorldSnapshot:
+        async with self.lock:
+            if self.world.player.location != "square":
+                raise PermissionError("要走到水潭边才能许愿")
+            if self.world.tick_index < self.world.player.weather_cooldown_until:
+                raise ValueError("水潭还没有平静下来")
+            self.world.weather = request.weather
+            self.world.player.weather_cooldown_until = self.world.tick_index + 4
+            verb = "掷下一颗石子，愿日光回来" if request.weather == "晴" else "用指尖划过水面，唤来薄雾"
+            event = self._event("weather_wish", f"{self._period()}，你在蝾螈水潭边{verb}。")
+            self._append_event(event)
+            self._touch_and_persist()
+            await self.events.publish(event)
+            return self.snapshot()
 
     async def apply_world_action(self, request: WorldActionRequest) -> WorldSnapshot:
         async with self.lock:
@@ -164,7 +311,7 @@ class WorldEngine:
             if not loaded:
                 raise LookupError("还没有可恢复的存档")
             needs_upgrade = (
-                loaded.schema_version < 2
+                loaded.schema_version < 3
                 or len(loaded.npcs) < 4
                 or any(not npc.plan.items for npc in loaded.npcs)
             )
@@ -220,6 +367,108 @@ class WorldEngine:
         event = self._event("npc_interaction", text, [first.id, second.id])
         self._append_event(event)
         await self.events.publish(event)
+
+    async def _maybe_player_greeting(self) -> None:
+        """高好感居民偶尔主动注意玩家；事件与气泡共用一句短台词。"""
+        if self.world.tick_index % 3 != 0:
+            return
+        candidates = [
+            npc for npc in self.world.npcs
+            if npc.state.location == self.world.player.location
+            and self.world.player.relationships.get(npc.id, Relationship(affinity=0, impression="")).affinity >= 35
+        ]
+        if not candidates:
+            return
+        npc = candidates[self.world.tick_index % len(candidates)]
+        if any(event.kind == "npc_greeting" and npc.id in event.participants for event in self.world.recent_events[:6]):
+            return
+        greetings = {
+            "momo": "又见面了。上次那句话，我还记得。",
+            "lili": "来得正好！汤还温着呢。",
+            "xiaoke": "嘿！要不要看我刚修好的小玩意？",
+            "ajie": "回来了。路上没事吧。",
+        }
+        greeting = greetings[npc.id]
+        npc.state.action.say = greeting
+        event = self._event("npc_greeting", f"{npc.profile.name}看见你，主动招呼：“{greeting}”", [npc.id])
+        self._append_event(event)
+        await self.events.publish(event)
+
+    async def _ensure_quest_pool(self) -> None:
+        active = [quest for quest in self.world.quests if quest.status != "completed"]
+        if len(active) >= 2:
+            return
+        active_givers = {quest.giver_id for quest in active}
+        npc = next((item for item in self.world.npcs if item.id not in active_givers), self.world.npcs[0])
+        quest, fallback = await self.ai.make_wish(npc, self.world)
+        if any(item.id == quest.id for item in self.world.quests):
+            return
+        self.world.quests.append(quest)
+        text = f"{npc.profile.name}心里多了一件小事：「{quest.title}」。"
+        if fallback:
+            text += "（已由 Mock 生成）"
+        event = self._event("quest_offered", text, [npc.id])
+        self._append_event(event)
+        await self.events.publish(event)
+
+    def _complete_quest_from_chat(self, npc: NPC) -> tuple[WishQuest, WorldEvent] | None:
+        pocket_ids = {item.id for item in self.world.player.pocket}
+        quest = next((item for item in self.world.quests if item.status == "accepted" and (
+            (item.type == "message" and item.target_npc_id == npc.id and any(message.quest_id == item.id for message in self.world.player.carried_messages))
+            or (item.type == "fetch" and item.giver_id == npc.id and item.required_item_id in pocket_ids)
+            or (item.type == "company" and item.giver_id == npc.id)
+        )), None)
+        if not quest:
+            return None
+        quest.status = "completed"
+        if quest.required_item_id:
+            self.world.player.pocket = [item for item in self.world.player.pocket if item.id != quest.required_item_id]
+        self.world.player.carried_messages = [item for item in self.world.player.carried_messages if item.quest_id != quest.id]
+        giver = self.get_npc(quest.giver_id)
+        relation = self.world.player.relationships.setdefault(giver.id, Relationship(affinity=0, impression="仍是陌生人。"))
+        relation.affinity = min(100, relation.affinity + 10)
+        relation.impression = f"答应的「{quest.title}」真的做到了。"
+        diary_line = f"第{self.world.day}天：外来者完成了「{quest.title}」。{quest.reward}。"
+        for participant_id in {quest.giver_id, quest.target_npc_id} - {None}:
+            participant = self.get_npc(str(participant_id))
+            if diary_line not in participant.memory.diary:
+                participant.memory.diary = (participant.memory.diary + [diary_line])[-12:]
+        if quest.secret_id:
+            self._unlock_secret(quest.secret_id, giver.profile.name)
+        event = self._event(
+            "quest_completed",
+            f"心愿完成：「{quest.title}」。{giver.profile.name}对你的信任增加了。",
+            [quest.giver_id] + ([quest.target_npc_id] if quest.target_npc_id else []),
+        )
+        self._append_event(event)
+        return quest, event
+
+    def _unlock_secret(self, secret_id: str, source: str) -> None:
+        if any(item.id == secret_id for item in self.world.player.journal):
+            return
+        secrets = {
+            "secret-sisters": ("同一锅汤", "莫莫总说自己不饿。利利知道，那只是姐姐不愿承认仍有人在等她回桌边。"),
+            "secret-keepsake": ("从不出售的旧物", "拾光最深处的收音机没有电池。莫莫每天擦它，是因为最后一段录音里有人叫过她的名字。"),
+            "secret-first-fix": ("第一件修好的东西", "小柯真正修好的第一件东西不是水泵，而是阿羯塔上那盏劫后熄灭过的灯。"),
+        }
+        title, text = secrets.get(secret_id, ("未命名的碎片", "这段记忆还没有被完整说出来。"))
+        self.world.player.journal.append(JournalSecret(
+            id=secret_id, title=title, text=text, source=source, unlocked_at=self.time_label(),
+        ))
+
+    def _get_quest(self, quest_id: str) -> WishQuest:
+        quest = next((item for item in self.world.quests if item.id == quest_id), None)
+        if not quest:
+            raise KeyError(quest_id)
+        return quest
+
+    def _player_near_npc(self, npc: NPC) -> bool:
+        if self.world.player.location != npc.state.location:
+            return False
+        location = next((item for item in self.world.locations if item.id == npc.state.location), None)
+        if not location:
+            return False
+        return math.hypot(self.world.player.x - location.x, self.world.player.y - (location.y + 55)) <= 185
 
     async def _summarize_full_memories(self) -> None:
         for npc in self.world.npcs:

@@ -15,8 +15,8 @@ class Location(BaseModel):
     description: str
     tone: str
     symbol: str = "·"
-    x: int = Field(default=500, ge=0, le=1000)
-    y: int = Field(default=325, ge=0, le=650)
+    x: int = Field(default=800, ge=0, le=1600)
+    y: int = Field(default=525, ge=0, le=1050)
 
 
 class ActivityDefinition(BaseModel):
@@ -98,6 +98,71 @@ class Relationship(BaseModel):
     impression: str
 
 
+class InventoryItem(BaseModel):
+    id: str
+    name: str
+    description: str
+    symbol: str = "◇"
+
+
+class JournalSecret(BaseModel):
+    id: str
+    title: str
+    text: str
+    source: str
+    unlocked_at: str
+
+
+class CarriedMessage(BaseModel):
+    id: str
+    quest_id: str
+    from_npc_id: str
+    to_npc_id: str
+    text: str
+
+
+class PlayerState(BaseModel):
+    name: str = "外来者"
+    appearance: Literal["moss", "ember", "slate"] = "moss"
+    location: str = "bus_stop"
+    x: int = Field(default=170, ge=0, le=1600)
+    y: int = Field(default=860, ge=0, le=1050)
+    pocket: list[InventoryItem] = Field(default_factory=list, max_length=4)
+    journal: list[JournalSecret] = Field(default_factory=list)
+    relationships: dict[str, Relationship] = Field(default_factory=dict)
+    carried_messages: list[CarriedMessage] = Field(default_factory=list)
+    weather_cooldown_until: int = 0
+
+
+QuestType = Literal["fetch", "message", "company"]
+QuestStatus = Literal["offered", "accepted", "completed"]
+
+
+class WishQuest(BaseModel):
+    id: str
+    giver_id: str
+    type: QuestType
+    title: str
+    description: str
+    target_npc_id: str | None = None
+    required_item_id: str | None = None
+    message: str | None = None
+    reward: str
+    secret_id: str | None = None
+    status: QuestStatus = "offered"
+    source: Literal["mock", "deepseek"] = "mock"
+
+
+class ScavengePoint(BaseModel):
+    id: str
+    label: str
+    location: str
+    x: int = Field(ge=0, le=1600)
+    y: int = Field(ge=0, le=1050)
+    item: InventoryItem
+    available: bool = True
+
+
 class NPC(BaseModel):
     id: str
     profile: NPCProfile
@@ -116,7 +181,7 @@ class WorldEvent(BaseModel):
 
 
 class WorldSnapshot(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 3
     tick_index: int = 0
     day: int = 1
     minute: int = 8 * 60
@@ -124,6 +189,9 @@ class WorldSnapshot(BaseModel):
     announcement: str = "今天也慢慢把日子长回来。"
     locations: list[Location]
     npcs: list[NPC]
+    player: PlayerState = Field(default_factory=PlayerState)
+    quests: list[WishQuest] = Field(default_factory=list)
+    scavenge_points: list[ScavengePoint] = Field(default_factory=list)
     recent_events: list[WorldEvent] = Field(default_factory=list)
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -153,12 +221,42 @@ class ChatResponse(BaseModel):
     reply: str
     source: Literal["mock", "deepseek"]
     fallback_reason: str | None = None
+    affinity_delta: int = 0
+    impression: str | None = None
+    completed_quest_id: str | None = None
 
 
 class WorldActionRequest(BaseModel):
     action: Literal["weather", "announcement", "gift"]
     value: str = Field(min_length=1, max_length=200)
     npc_id: str | None = None
+
+
+class PlayerMoveRequest(BaseModel):
+    x: int = Field(ge=0, le=1600)
+    y: int = Field(ge=0, le=1050)
+    location: str
+
+
+class PlayerAppearanceRequest(BaseModel):
+    appearance: Literal["moss", "ember", "slate"]
+
+
+class ScavengeRequest(BaseModel):
+    point_id: str
+
+
+class GiftRequest(BaseModel):
+    npc_id: str
+    item_id: str
+
+
+class BoardPostRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=120)
+
+
+class WeatherWishRequest(BaseModel):
+    weather: Literal["晴", "雾"]
 
 
 def _activity(id_: str, label: str, location: str, *narratives: str) -> ActivityDefinition:
@@ -203,13 +301,15 @@ def _seed_plan(npc_id: str, day: int = 1) -> DailyPlan:
 
 
 def initial_world() -> WorldSnapshot:
-    """v2 初始化数据：地点、人物、动作定义与关系集中在一处，便于审阅。"""
+    """v3 初始化数据：世界、玩家、心愿与拾取点集中定义，便于审阅和改数值。"""
     locations = [
-        Location(id="store", name="杂物铺「拾光」", description="旧物、暖灯与被仔细保存的记忆。", tone="amber", symbol="旧", x=190, y=205),
-        Location(id="repair", name="修理棚", description="铁皮、帆布和总也收不完的零件。", tone="rust", symbol="修", x=510, y=140),
-        Location(id="tower", name="边缘瞭望塔", description="风从废墟方向来，塔顶一直亮着孤灯。", tone="slate", symbol="塔", x=820, y=190),
-        Location(id="greenhouse", name="温室食堂「芽」", description="碎玻璃拼成的温室，长桌旁总有热汤。", tone="green", symbol="芽", x=785, y=470),
-        Location(id="square", name="中央广场·水潭", description="公告板立在水潭边，蝾螈躲在石缝里。", tone="blue", symbol="水", x=390, y=455),
+        Location(id="store", name="杂物铺「拾光」", description="旧物、暖灯与被仔细保存的记忆。", tone="amber", symbol="旧", x=365, y=305),
+        Location(id="repair", name="修理棚", description="铁皮、帆布和总也收不完的零件。", tone="rust", symbol="修", x=790, y=195),
+        Location(id="tower", name="边缘瞭望塔", description="风从废墟方向来，塔顶一直亮着孤灯。", tone="slate", symbol="塔", x=1135, y=230),
+        Location(id="greenhouse", name="温室食堂「芽」", description="碎玻璃拼成的温室，长桌旁总有热汤。", tone="green", symbol="芽", x=1030, y=610),
+        Location(id="square", name="中央广场·水潭", description="公告板立在水潭边，蝾螈躲在石缝里。", tone="blue", symbol="水", x=515, y=575),
+        Location(id="bus_stop", name="旧巴士站", description="锈掉的站牌仍朝着镇外，旧行李等着最后一位旅人。", tone="rust", symbol="站", x=175, y=865),
+        Location(id="boundary", name="废墟界碑", description="镇界外的断墙在夜里泛起冷光，没人知道光从哪里来。", tone="slate", symbol="界", x=1405, y=145),
     ]
     momo = NPC(
         id="momo",
@@ -239,15 +339,61 @@ def initial_world() -> WorldSnapshot:
         memory=NPCMemory(short_term=["天亮前，废墟方向似乎闪过一道光。"], diary=["第 1 天：风向没变。镇子安全。别的事以后再说。"]), plan=_seed_plan("ajie"),
         relationships={"xiaoke": Relationship(affinity=45, impression="太吵。但这很好。"), "momo": Relationship(affinity=50, impression="不需要解释，也能坐在同一盏灯下。")},
     )
-    return WorldSnapshot(schema_version=2, locations=locations, npcs=[momo, lili, xiaoke, ajie])
+    player = PlayerState(
+        relationships={
+            "momo": Relationship(affinity=10, impression="刚进镇的外来者，似乎愿意听旧故事。"),
+            "lili": Relationship(affinity=25, impression="风尘仆仆的，得先让人喝口热汤。"),
+            "xiaoke": Relationship(affinity=18, impression="从镇外来，也许见过不少没拆过的机器！"),
+            "ajie": Relationship(affinity=0, impression="身份不明。先观察。"),
+        }
+    )
+    quests = [
+        WishQuest(
+            id="wish-lili-message", giver_id="lili", type="message", title="还热着的汤",
+            description="利利想让你替她告诉莫莫：汤还热着，别又只顾着擦旧物。",
+            target_npc_id="momo", message="利利说，汤还热着，让你别又只顾着擦旧物。",
+            reward="利利与莫莫都更信任你", secret_id="secret-sisters",
+        ),
+        WishQuest(
+            id="wish-momo-ticket", giver_id="momo", type="fetch", title="没有终点的车票",
+            description="莫莫在找一张遗落在旧巴士站行李里的旧车票。",
+            required_item_id="old-ticket", reward="莫莫会讲起一件从不出售的旧物", secret_id="secret-keepsake",
+        ),
+        WishQuest(
+            id="wish-xiaoke-nut", giver_id="xiaoke", type="fetch", title="就差这一颗",
+            description="小柯需要水潭边那颗方头螺母，才能把旧水泵重新装起来。",
+            required_item_id="square-nut", reward="小柯会把第一件修好的东西送给你", secret_id="secret-first-fix",
+        ),
+    ]
+    scavenge_points = [
+        ScavengePoint(id="bus-luggage", label="翻看旧行李", location="bus_stop", x=155, y=900,
+            item=InventoryItem(id="old-ticket", name="褪色车票", description="终点站一栏已经被雨水泡开。", symbol="票")),
+        ScavengePoint(id="pond-nut", label="捡起方头螺母", location="square", x=610, y=625,
+            item=InventoryItem(id="square-nut", name="方头螺母", description="沾着水草，却没有生锈。", symbol="螺")),
+        ScavengePoint(id="boundary-glow", label="触碰微光碎片", location="boundary", x=1400, y=180,
+            item=InventoryItem(id="glow-shard", name="微光碎片", description="摸起来冰凉，离开界碑后仍在发光。", symbol="光")),
+    ]
+    return WorldSnapshot(
+        schema_version=3,
+        locations=locations,
+        npcs=[momo, lili, xiaoke, ajie],
+        player=player,
+        quests=quests,
+        scavenge_points=scavenge_points,
+    )
 
 
 def upgrade_world(world: WorldSnapshot) -> WorldSnapshot:
-    """把 v1 数据温和合并进 v2 种子，部署升级后不丢时间、天气与已有记忆。"""
+    """把旧快照温和合并进 v3 种子，不丢时间、NPC 记忆与已有玩家进度。"""
     fresh = initial_world()
     fresh.day, fresh.minute = world.day, world.minute
     fresh.weather, fresh.announcement = world.weather, world.announcement
     fresh.recent_events = world.recent_events[:16]
+    old_player = getattr(world, "player", None)
+    if old_player and world.schema_version >= 3:
+        fresh.player = old_player
+        fresh.quests = world.quests or fresh.quests
+        fresh.scavenge_points = world.scavenge_points or fresh.scavenge_points
     existing = {npc.id: npc for npc in world.npcs}
     for npc in fresh.npcs:
         old = existing.get(npc.id)

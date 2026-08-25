@@ -34,9 +34,35 @@ export interface WorldEvent {
   id: string; at: string; kind: string; text: string; participants: string[];
 }
 
+export interface InventoryItem {
+  id: string; name: string; description: string; symbol: string;
+}
+
+export interface PlayerRelationship { affinity: number; impression: string; }
+
+export interface PlayerState {
+  name: string; appearance: "moss" | "ember" | "slate"; location: string; x: number; y: number;
+  pocket: InventoryItem[];
+  journal: Array<{ id: string; title: string; text: string; source: string; unlocked_at: string }>;
+  relationships: Record<string, PlayerRelationship>;
+  carried_messages: Array<{ id: string; quest_id: string; from_npc_id: string; to_npc_id: string; text: string }>;
+  weather_cooldown_until: number;
+}
+
+export interface WishQuest {
+  id: string; giver_id: string; type: "fetch" | "message" | "company"; title: string; description: string;
+  target_npc_id: string | null; required_item_id: string | null; message: string | null;
+  reward: string; secret_id: string | null; status: "offered" | "accepted" | "completed"; source: ActionSource;
+}
+
+export interface ScavengePoint {
+  id: string; label: string; location: string; x: number; y: number; item: InventoryItem; available: boolean;
+}
+
 export interface World {
   schema_version: number; tick_index: number; day: number; minute: number; weather: string;
-  announcement: string; locations: Location[]; npcs: NPC[]; recent_events: WorldEvent[]; updated_at: string;
+  announcement: string; locations: Location[]; npcs: NPC[]; player: PlayerState; quests: WishQuest[];
+  scavenge_points: ScavengePoint[]; recent_events: WorldEvent[]; updated_at: string;
 }
 
 export interface Health { status: string; ai_mode: ActionSource; model: string; }
@@ -54,7 +80,7 @@ async function chatStream(
   npcId: string,
   message: string,
   onDelta: (delta: string) => void,
-): Promise<{ reply: string; source: ActionSource; fallbackReason?: string }> {
+): Promise<{ reply: string; source: ActionSource; fallbackReason?: string; affinityDelta: number; impression?: string; completedQuestId?: string }> {
   const response = await fetch(`/api/chat/${npcId}/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -66,6 +92,9 @@ async function chatStream(
   let buffer = "", reply = "";
   let source: ActionSource = "mock";
   let fallbackReason: string | undefined;
+  let affinityDelta = 0;
+  let impression: string | undefined;
+  let completedQuestId: string | undefined;
   while (true) {
     const { value, done } = await reader.read();
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
@@ -78,6 +107,9 @@ async function chatStream(
       if (event.type === "meta") {
         source = event.source;
         fallbackReason = event.fallback_reason || undefined;
+        affinityDelta = event.affinity_delta ?? 0;
+        impression = event.impression || undefined;
+        completedQuestId = event.completed_quest_id || undefined;
       } else if (event.type === "delta") {
         reply += event.delta;
         onDelta(event.delta);
@@ -85,7 +117,7 @@ async function chatStream(
     }
     if (done) break;
   }
-  return { reply, source, fallbackReason };
+  return { reply, source, fallbackReason, affinityDelta, impression, completedQuestId };
 }
 
 export const api = {
@@ -95,6 +127,25 @@ export const api = {
   chatStream,
   worldAction: (action: string, value: string, npcId?: string) => request<World>("/api/world/actions", {
     method: "POST", body: JSON.stringify({ action, value, npc_id: npcId }),
+  }),
+  movePlayer: (x: number, y: number, location: string) => request<World>("/api/player/move", {
+    method: "POST", body: JSON.stringify({ x, y, location }),
+  }),
+  setAppearance: (appearance: PlayerState["appearance"]) => request<World>("/api/player/appearance", {
+    method: "POST", body: JSON.stringify({ appearance }),
+  }),
+  acceptQuest: (questId: string) => request<World>(`/api/quests/${questId}/accept`, { method: "POST" }),
+  scavenge: (pointId: string) => request<World>("/api/player/scavenge", {
+    method: "POST", body: JSON.stringify({ point_id: pointId }),
+  }),
+  gift: (npcId: string, itemId: string) => request<World>("/api/player/gift", {
+    method: "POST", body: JSON.stringify({ npc_id: npcId, item_id: itemId }),
+  }),
+  postBoard: (text: string) => request<World>("/api/board", {
+    method: "POST", body: JSON.stringify({ text }),
+  }),
+  wishWeather: (weather: "晴" | "雾") => request<World>("/api/wish-weather", {
+    method: "POST", body: JSON.stringify({ weather }),
   }),
   save: () => request<{ message: string; save_id: number }>("/api/world/save", { method: "POST" }),
   load: () => request<World>("/api/world/load", { method: "POST" }),

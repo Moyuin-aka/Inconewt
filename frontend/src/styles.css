@@ -23,7 +23,7 @@ button:disabled { cursor: wait; opacity: .42; }
 .town-stage canvas { width: 100% !important; height: 100% !important; object-fit: cover; }
 .game-shell::after { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 180px rgba(16,21,17,.55); }
 
-.hud-world, .hud-system, .god-controls, .story-feed, .announcement-ribbon, .version-mark { position: absolute; z-index: 10; }
+.hud-world, .hud-system, .story-feed, .announcement-ribbon, .version-mark { position: absolute; z-index: 10; }
 .hud-world { top: 24px; left: 28px; display: flex; flex-direction: column; gap: 15px; }
 .brand-lockup { display: flex; align-items: center; gap: 12px; filter: drop-shadow(0 3px 8px rgba(0,0,0,.35)); }
 .newt-mark { width: 46px; height: 46px; display: grid; place-items: center; border: 1px solid rgba(239,232,211,.8); border-radius: 48% 52% 55% 45%; color: #d8dfbd; font: 32px Georgia, serif; transform: rotate(-9deg); }
@@ -60,21 +60,6 @@ button:disabled { cursor: wait; opacity: .42; }
 .story-feed p { margin: 0; font: 10px/1.45 Georgia, "Songti SC", serif; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 @keyframes story-in { from { opacity: 0; transform: translateX(-10px); } }
 
-.god-controls { left: 28px; right: 28px; bottom: 20px; height: 78px; display: flex; align-items: stretch; gap: 10px; padding: 8px; border: 1px solid rgba(236,229,209,.36); background: #20261f; box-shadow: 0 15px 50px rgba(0,0,0,.25); }
-.control-label { min-width: 185px; display: flex; justify-content: center; flex-direction: column; padding: 0 13px; border-right: 1px solid var(--line); }
-.control-label small { font: 8px ui-monospace, monospace; letter-spacing: .16em; opacity: .5; }
-.control-label strong { margin-top: 4px; font: 500 15px Georgia, "Songti SC", serif; }
-.control-buttons { display: flex; flex: 1; gap: 7px; }
-.control-buttons button { min-width: 82px; display: grid; grid-template-columns: 25px 1fr; align-items: center; gap: 6px; border: 1px solid var(--line); background: rgba(238,230,207,.06); padding: 0 10px; transition: .2s ease; }
-.control-buttons button:hover:not(:disabled) { color: var(--ink); background: var(--paper); transform: translateY(-3px); box-shadow: 0 6px 0 rgba(0,0,0,.22); }
-.control-buttons i { font: normal 20px Georgia, serif; }
-.control-buttons span { font-size: 10px; white-space: nowrap; }
-.advance-button { width: 190px; position: relative; display: flex; justify-content: center; flex-direction: column; border: 1px solid #aebc96; background: var(--moss); padding: 0 48px 0 17px; text-align: left; transition: .2s ease; }
-.advance-button:hover:not(:disabled) { background: #6f865f; box-shadow: inset 0 0 0 3px rgba(235,228,209,.18); }
-.advance-button small { font: 8px ui-monospace, monospace; letter-spacing: .15em; opacity: .65; }
-.advance-button strong { margin-top: 3px; font: 600 16px Georgia, "Songti SC", serif; }
-.advance-button b { position: absolute; right: 18px; top: 50%; transform: translateY(-50%); font-size: 22px; transition: transform .2s; }
-.advance-button:hover b { transform: translate(5px, -50%); }
 .version-mark { right: 31px; bottom: 105px; font: 8px ui-monospace, monospace; letter-spacing: .15em; opacity: .5; }
 
 .archive-panel { position: absolute; z-index: 40; top: 0; right: 0; width: min(470px, 94vw); height: 100%; color: var(--ink); background: var(--paper); box-shadow: -28px 0 70px rgba(0,0,0,.38); animation: panel-in .32s cubic-bezier(.2,.8,.2,1); overflow: hidden; }
@@ -176,6 +161,84 @@ button:disabled { cursor: wait; opacity: .42; }
 .dialogue-box input { min-width: 0; border: 0; outline: 0; color: var(--ink); background: rgba(255,255,255,.2); padding: 13px; }
 .dialogue-box form button { border: 0; color: var(--paper); background: var(--moss); padding: 0 18px; font-size: 10px; }
 
+.player-dock { position: absolute; z-index: 22; left: 28px; right: 28px; bottom: 20px; min-height: 82px; display: grid; grid-template-columns: minmax(260px, .95fr) minmax(260px, .8fr) minmax(410px, 1.35fr) auto; align-items: stretch; color: var(--paper); border: 1px solid rgba(236,229,209,.38); background: #20261f; box-shadow: 0 18px 55px rgba(0,0,0,.33); }
+.player-identity { display: flex; align-items: center; gap: 11px; padding: 9px 13px; border-right: 1px solid var(--line); }
+.player-token { width: 42px; height: 50px; display: grid; place-items: center; flex: 0 0 auto; color: #22271f; border: 2px solid rgba(238,230,207,.75); font: 700 17px Georgia, "Songti SC", serif; box-shadow: 5px 5px 0 rgba(0,0,0,.23); }
+.player-token.appearance-moss { background: #a9c389; }
+.player-token.appearance-ember { background: #d99464; }
+.player-token.appearance-slate { background: #a4b2bc; }
+.player-identity small, .pocket-strip > small { display: block; font: 7px ui-monospace, monospace; letter-spacing: .14em; opacity: .55; }
+.player-identity strong { display: block; max-width: 185px; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 13px Georgia, "Songti SC", serif; }
+.appearance-picker { display: flex; gap: 4px; margin-left: auto; }
+.appearance-picker button { width: 15px; height: 15px; padding: 0; border: 1px solid rgba(238,230,207,.48); border-radius: 50%; }
+.appearance-picker button.moss { background: #8ca76f; }.appearance-picker button.ember { background: #d3834d; }.appearance-picker button.slate { background: #85949e; }
+.appearance-picker button.active { outline: 2px solid #efe3bb; outline-offset: 2px; }
+.pocket-strip { padding: 10px 12px; border-right: 1px solid var(--line); }
+.pocket-strip > div { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 8px; }
+.pocket-strip span { min-width: 45px; height: 43px; display: flex; align-items: center; justify-content: center; gap: 4px; overflow: hidden; border: 1px dashed rgba(238,230,207,.22); color: rgba(238,230,207,.3); font-size: 8px; }
+.pocket-strip span.filled { justify-content: flex-start; padding: 5px; border-style: solid; color: #eae1ca; background: rgba(238,230,207,.07); }
+.pocket-strip span b { display: grid; place-items: center; min-width: 22px; height: 22px; color: var(--ink); background: #d7c896; font: 9px Georgia, serif; }
+.player-actions { position: relative; display: flex; align-items: center; gap: 6px; padding: 9px 11px; }
+.player-actions > button { min-height: 42px; padding: 0 11px; border: 1px solid var(--line); background: rgba(238,230,207,.06); font-size: 9px; transition: .18s ease; }
+.player-actions > button:hover:not(:disabled) { color: var(--ink); background: var(--paper); transform: translateY(-2px); }
+.player-actions > button b { margin-left: 4px; color: #e5b87a; }
+.nearby-callout { position: absolute; left: 12px; top: -27px; padding: 5px 9px; color: var(--ink); background: #ead597; font: 10px Georgia, "Songti SC", serif; box-shadow: 4px 5px 0 rgba(0,0,0,.2); animation: prompt-in .22s ease; }
+.nearby-callout kbd, .move-hint kbd { margin-right: 5px; font: 700 8px ui-monospace, monospace; }
+@keyframes prompt-in { from { opacity: 0; transform: translateY(5px); } }
+.move-hint { min-width: 104px; display: grid; place-content: center; padding: 8px 13px; color: #aeb6a2; border-left: 1px solid var(--line); text-align: center; font-size: 8px; }
+.move-hint kbd { margin: 0 0 5px; color: #e8dfc9; letter-spacing: .13em; }
+
+.notebook-panel, .observer-panel { position: absolute; z-index: 58; top: 0; right: 0; height: 100%; color: var(--ink); background: #e9e1cc; box-shadow: -25px 0 75px rgba(0,0,0,.42); animation: panel-in .3s cubic-bezier(.2,.8,.2,1); }
+.notebook-panel { width: min(560px, 96vw); padding: 27px 28px 34px; overflow: auto; }
+.notebook-panel h2, .observer-panel h2, .board-composer h2 { margin: 7px 0 14px; font: 500 34px Georgia, "Songti SC", serif; }
+.notebook-panel > nav { display: flex; border-top: 1px solid rgba(32,37,30,.3); border-bottom: 1px solid rgba(32,37,30,.3); }
+.notebook-panel > nav button { flex: 1; border: 0; border-bottom: 3px solid transparent; color: #77776c; background: transparent; padding: 12px; }
+.notebook-panel > nav button.active { color: var(--ink); border-color: var(--moss); }
+.quest-list { display: grid; gap: 12px; margin-top: 17px; }
+.quest-card { position: relative; padding: 15px 16px; border: 1px solid rgba(32,37,30,.2); background: rgba(255,255,255,.24); }
+.quest-card.status-completed { opacity: .58; }
+.quest-card > header { display: flex; justify-content: space-between; }
+.quest-card > header span { padding: 3px 7px; color: #f5edda; background: var(--moss); font-size: 8px; letter-spacing: .12em; }
+.quest-card > header small { font: 8px ui-monospace, monospace; color: #777a6e; }
+.quest-card h3 { margin: 10px 0 5px; font: 600 18px Georgia, "Songti SC", serif; }
+.quest-card > p { margin: 0; font: 11px/1.55 Georgia, "Songti SC", serif; color: #5d6156; }
+.quest-card dl { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; margin: 12px 0 0; }
+.quest-card dl div { padding-top: 7px; border-top: 1px dashed rgba(32,37,30,.17); }
+.quest-card dt { font: 7px ui-monospace, monospace; color: #85877b; }.quest-card dd { margin: 4px 0 0; font-size: 9px; }
+.quest-card > button { margin-top: 12px; border: 0; color: var(--paper); background: var(--ink); padding: 9px 12px; font-size: 9px; }
+.quest-card footer { margin-top: 12px; padding: 7px 9px; color: #56644d; background: rgba(87,108,76,.11); font-size: 9px; }
+.secret-grid { display: grid; gap: 11px; margin-top: 17px; }
+.secret-grid article { display: grid; grid-template-columns: 45px 1fr; gap: 13px; padding: 14px; border-left: 4px solid var(--ember); background: rgba(255,255,255,.25); }
+.secret-grid article > span { font: 28px Georgia, serif; color: #b87045; }
+.secret-grid small { font: 7px ui-monospace, monospace; color: #828479; }.secret-grid h3 { margin: 5px 0; font: 600 16px Georgia, "Songti SC", serif; }.secret-grid p { margin: 0; font: 10px/1.55 Georgia, "Songti SC", serif; color: #606359; }
+.secret-grid article.locked { border-color: #aaa89d; filter: grayscale(1); opacity: .58; }
+
+.observer-panel { width: min(355px, 92vw); padding: 28px; }
+.observer-panel > p:not(.eyebrow) { font: 11px/1.65 Georgia, "Songti SC", serif; color: #606459; }
+.observer-panel > div { display: grid; gap: 8px; margin-top: 20px; }
+.observer-panel > div button { border: 1px solid rgba(32,37,30,.3); color: var(--ink); background: transparent; padding: 11px; text-align: left; transition: .18s; }
+.observer-panel > div button:hover:not(:disabled) { color: var(--paper); background: var(--ink); padding-left: 17px; }
+
+.board-composer { position: absolute; z-index: 75; inset: 0; display: grid; place-items: center; background: rgba(15,19,15,.7); }
+.board-composer form { width: min(550px, 91vw); color: var(--ink); background: #e7dec5; border-top: 5px solid var(--ember); box-shadow: 0 30px 90px rgba(0,0,0,.55); padding: 25px; }
+.board-composer form > small { font: 8px ui-monospace, monospace; letter-spacing: .16em; color: #74776d; }
+.board-composer form > p { margin: -5px 0 16px; font: 11px/1.55 Georgia, "Songti SC", serif; color: #676a60; }
+.board-composer textarea { width: 100%; min-height: 115px; resize: vertical; border: 1px solid rgba(32,37,30,.3); outline: 0; color: var(--ink); background: rgba(255,255,255,.28); padding: 13px; font: 15px/1.6 Georgia, "Songti SC", serif; }
+.board-composer footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 10px; }
+.board-composer footer span { margin-right: auto; font: 8px ui-monospace, monospace; color: #7b7d73; }
+.board-composer footer button { border: 1px solid var(--ink); color: var(--ink); background: transparent; padding: 9px 12px; font-size: 9px; }
+.board-composer footer button:last-child { color: var(--paper); background: var(--moss); border-color: var(--moss); }
+
+.player-impression { margin-bottom: 15px; padding: 12px; border: 1px solid rgba(32,37,30,.2); background: rgba(212,122,67,.08); }
+.player-impression > small { font: 8px ui-monospace, monospace; letter-spacing: .12em; color: #797a70; }
+.player-impression header { display: flex; justify-content: space-between; margin-top: 7px; }.player-impression header b { font: 15px Georgia, "Songti SC", serif; }.player-impression header span { font: 12px ui-monospace, monospace; }
+.player-impression > i { display: block; height: 5px; margin: 7px 0; background: rgba(32,37,30,.1); }.player-impression > i b { display: block; height: 100%; background: var(--ember); }
+.player-impression p { margin: 0; font: 10px/1.5 Georgia, "Songti SC", serif; }
+.archive-gifts { display: flex; align-items: center; gap: 5px; margin: 5px 0; overflow-x: auto; }
+.archive-gifts small { margin-right: 4px; white-space: nowrap; font: 7px ui-monospace, monospace; color: #797b70; }
+.archive-gifts button { white-space: nowrap; border: 1px solid rgba(32,37,30,.24); color: var(--ink); background: transparent; padding: 5px 7px; font-size: 8px; }
+.dialogue-history p.impression { padding: 6px; color: #5e6357; background: rgba(87,108,76,.1); }
+
 .loading-screen { width: 100%; height: 100%; display: grid; place-content: center; text-align: center; color: #e6dfcc; background: radial-gradient(circle at center, #58634e, #222820 70%); }
 .newt-sigil { width: 70px; height: 70px; margin: auto; display: grid; place-items: center; border: 1px solid #dcd4bb; border-radius: 50% 46% 54% 48%; font: 45px Georgia, serif; animation: breathe 1.4s ease-in-out infinite alternate; }
 .loading-screen h1 { margin: 18px 0 0; font: 700 22px Georgia, serif; letter-spacing: .25em; }
@@ -193,16 +256,15 @@ button:disabled { cursor: wait; opacity: .42; }
   .story-feed { left: 14px; bottom: 98px; width: 44vw; }
   .story-feed article { grid-template-columns: 1fr; }
   .story-feed time { display: none; }
-  .god-controls { left: 14px; right: 14px; bottom: 12px; height: 72px; }
-  .control-label { display: none; }
-  .control-buttons button { min-width: 52px; grid-template-columns: 1fr; place-items: center; padding: 4px; }
-  .control-buttons i { font-size: 16px; }
-  .control-buttons span { font-size: 8px; }
-  .advance-button { width: 130px; }
   .version-mark { display: none; }
   .data-grid { grid-template-columns: repeat(2, 1fr); }
   .dialogue-portrait { left: -7vw; width: 66vw; }
   .dialogue-box { left: 3vw; right: 3vw; bottom: 3vh; }
+  .player-dock { left: 14px; right: 14px; bottom: 12px; grid-template-columns: minmax(210px, 1fr) minmax(210px, .9fr) 1.2fr; }
+  .player-actions { justify-content: flex-end; }
+  .player-actions > button { padding: 0 8px; }
+  .move-hint { display: none; }
+  .player-identity strong { max-width: 130px; }
 }
 
 @media (max-width: 600px) {
@@ -212,11 +274,6 @@ button:disabled { cursor: wait; opacity: .42; }
   .announcement-ribbon { max-width: 92vw; }
   .story-feed { width: calc(100vw - 28px); bottom: 91px; }
   .story-feed article:nth-of-type(n+3) { display: none; }
-  .god-controls { height: 66px; padding: 5px; }
-  .control-buttons button:nth-child(4) { display: none; }
-  .advance-button { width: 106px; padding-left: 10px; }
-  .advance-button strong { font-size: 12px; }
-  .advance-button b { right: 10px; }
   .archive-panel { width: 100%; }
   .data-grid { grid-template-columns: 1fr; }
   .dialogue-portrait { top: 7vh; left: -22vw; width: 95vw; height: 62vh; }
@@ -224,4 +281,12 @@ button:disabled { cursor: wait; opacity: .42; }
   .dialogue-history { display: none; }
   .dialogue-box form { grid-template-columns: 1fr auto; }
   .dialogue-box form > span { display: none; }
+  .player-dock { min-height: 66px; grid-template-columns: 1fr auto; }
+  .player-identity { padding: 7px 9px; }
+  .player-token { width: 34px; height: 40px; }
+  .appearance-picker, .pocket-strip { display: none; }
+  .player-actions { padding: 6px; }
+  .player-actions > button:nth-of-type(-n+2) { display: none; }
+  .player-actions > button { min-height: 38px; padding: 0 7px; }
+  .nearby-callout { left: auto; right: 5px; top: -26px; }
 }
