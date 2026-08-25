@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
         store.close()
 
 
-app = FastAPI(title="Inconnewt API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Inconnewt API", version="0.1.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

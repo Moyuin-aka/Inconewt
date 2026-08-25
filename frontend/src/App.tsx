@@ -263,7 +263,7 @@ export default function App() {
         </div>
       </section>
 
-      <footer><span>INCONNU × NEWT</span><p>未知之中，也保留再生的能力。</p><small>Demo v0.1.0</small></footer>
+      <footer><span>INCONNU × NEWT</span><p>未知之中，也保留再生的能力。</p><small>Demo v0.1.1</small></footer>
 
       {chatting && <ChatDrawer npc={selectedNpc} lines={chatLines[selectedNpc.id] ?? []} busy={busy === "对话生成中"} onClose={() => setChatting(false)} onSend={sendChat} />}
     </main>
