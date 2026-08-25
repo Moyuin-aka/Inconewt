@@ -42,15 +42,29 @@ export default function App() {
   useEffect(() => {
     refresh().catch((reason) => setError(reason.message));
     const events = new EventSource("/api/events");
+    let refreshTimer: number | undefined;
+    let bannerTimer: number | undefined;
+    const scheduleWorldRefresh = () => {
+      if (refreshTimer !== undefined) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = undefined;
+        api.world().then(setWorld).catch(() => undefined);
+      }, 300);
+    };
     events.addEventListener("world", (event) => {
       try {
         const update = JSON.parse((event as MessageEvent).data);
         setBanner(update.text);
-        window.setTimeout(() => setBanner(""), 3600);
+        if (bannerTimer !== undefined) window.clearTimeout(bannerTimer);
+        bannerTimer = window.setTimeout(() => setBanner(""), 3600);
       } catch { /* 保持世界轮询可用 */ }
-      api.world().then(setWorld).catch(() => undefined);
+      scheduleWorldRefresh();
     });
-    return () => events.close();
+    return () => {
+      events.close();
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      if (bannerTimer !== undefined) window.clearTimeout(bannerTimer);
+    };
   }, []);
 
   const archiveNpc = useMemo(() => world?.npcs.find((npc) => npc.id === archiveId), [world, archiveId]);
@@ -114,7 +128,6 @@ export default function App() {
   return (
     <main className={`game-shell weather-${world.weather} ${dialogueNpc ? "dialogue-open" : ""}`}>
       <TownStage world={world} onResidentClick={(npcId) => { setArchiveId(npcId); setDataMode(false); }} />
-      <div className="paper-grain" />
 
       <section className="hud-world">
         <div className="brand-lockup"><span className="newt-mark">≈</span><div><h1>INCONNEWT</h1><p>NEW(T) TOWN / LIVE WORLD</p></div></div>
@@ -147,7 +160,7 @@ export default function App() {
         <button className="advance-button" onClick={() => run("世界向前走了一刻", api.tick)} disabled={Boolean(busy)}><small>{busy || "NEXT TICK"}</small><strong>推进一刻</strong><b>→</b></button>
       </section>
 
-      <div className="version-mark">WORLD v0.2.0 · TICK {world.tick_index}</div>
+      <div className="version-mark">WORLD v0.2.1 · TICK {world.tick_index}</div>
       {archiveNpc && !dialogueNpc && <ArchivePanel npc={archiveNpc} residents={world.npcs} onClose={() => setArchiveId(null)} onTalk={() => setDialogueId(archiveNpc.id)} />}
       {dataMode && <DataMode world={world} onClose={() => setDataMode(false)} />}
       {dialogueNpc && <DialogueOverlay npc={dialogueNpc} lines={dialogues[dialogueNpc.id] ?? []} busy={busy === "对话生成中"} onClose={() => setDialogueId(null)} onSend={sendDialogue} />}

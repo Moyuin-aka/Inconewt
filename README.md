@@ -4,6 +4,8 @@ Web 版 AI 小镇 Demo。居民会依据人设、需求、日程和记忆自主�
 
 技术栈：React、Phaser、FastAPI、SQLite、Docker Compose。
 
+角色精灵改编自 [Kenney RPG Urban Pack](https://kenney.nl/assets/rpg-urban-pack)，采用 CC0 许可。
+
 ## 启动
 
 ```bash

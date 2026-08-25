@@ -218,3 +218,58 @@ AI 小镇 Web 游戏
 - [x] 后端:同地点 NPC 自主对话(2–4 轮,写记忆改好感,进事件流)
 - [x] 记忆去重 + 摘要闭环;事件流叙事化(AI/Mock 双模板)
 - [x] 新增 pytest:反重复决策、每日计划生成降级、NPC 互动触发
+
+---
+
+# 迭代方向 v2.1 —— 场景美术落地 + 性能修补（新增需求）
+
+## 问题诊断（基于 v2 代码审查）
+
+1. **场景没有图**:`TownStage.tsx` 里整个小镇是 Phaser Graphics 画的几何色块(建筑=矩形、NPC=程序生成的圆头小人),项目从未加载过任何场景贴图;`public/assets` 只有 4 张档案立绘。
+2. **卡顿三个实锤**:
+   - **Tween 泄漏(主因,越开越卡)**:`syncWorld` 每次世界更新都新建 night/fog 补间且不清理旧的;`walkActor` 的 `bob` 补间(`repeat:-1`)挂在 sprite 上,打断移动时只 `killTweensOf(container)`,连续移动两次后旧 bob 永远杀不掉。补间数量随运行时间线性增长。
+   - **合成器压力**:canvas 上层盖了 `mix-blend-mode: soft-light` 的 `.paper-grain`(迫使浏览器每帧重混整个 WebGL canvas)+ 6 处常驻 `backdrop-filter: blur`。
+   - **立绘太重**:~550KB/张的 PNG 直接当背景,再套 20px `drop-shadow` filter,对话时每帧对大图算模糊。
+
+## 优化方向 Prompt（可直接交给开发 agent 执行）
+
+> 你在给 Inconnewt v2 做美术落地与性能修补。**不改后端、不改交互结构**,只动前端渲染层。分两组,P 组(性能)先做——美术贴图加上去之前必须先止住泄漏,否则贴图只会更卡。
+
+### P. 性能修补（先做,半天量级）
+
+1. **修 tween 泄漏**:
+   - `syncWorld` 中对 night/fog 补间前先 `this.tweens.killTweensOf(this.night)` / `killTweensOf(this.fog)`;更好的做法是仅当目标值变化时才补间(记录上次 nightAlpha/fogAlpha,相同则跳过);
+   - `walkActor` 打断时同时 `killTweensOf(actor.sprite)` 与 `killTweensOf(actor.bubble)`,并把 sprite 角度归零;
+   - 自验:控制台跑 `scene.tweens.getTweens().length`,连续推进 20 个 tick,数量必须稳定不增长。
+2. **世界更新去抖**:`setWorld` 入口比较 `tick_index` + 天气 + 公告 + 各 NPC 位置,无实质变化直接 return,避免 SSE 高频触发重复 sync;SSE handler 里的 `api.world()` 拉取加 300ms 节流。
+3. **减合成器负担**:`.paper-grain` 去掉 `mix-blend-mode`(改成低透明度普通叠加,或把纸纹搬进 Phaser 作为最顶层 tileSprite);`backdrop-filter: blur` 只保留对话遮罩一处,HUD 面板改为不透明底色(当前深色底 + 0.72 透明度视觉差异极小)。
+4. **立绘瘦身**:4 张立绘转 WebP、长边 ≤1000px、单张 ≤150KB;`drop-shadow` filter 换成立绘图内预烘焙阴影或一层简单半透明衬底;进入小镇时预加载,避免首次开对话闪加载。
+5. **Phaser 配置**:`type: Phaser.WEBGL` 写死(排除 Canvas 回退导致两个全屏 MULTIPLY 矩形巨慢的情况),加 `powerPreference: "high-performance"`。
+
+### A. 场景美术落地（两条路线二选一,推荐路线 1）
+
+> 共同原则:场景只需要**一张静态底图**,不引入 Tiled 运行时解析。建筑标签、点击热区、NPC 锚点全部沿用现有坐标体系,只是把「色块」换成「贴图」。底图做 2000×1300(逻辑 1000×650 的 @2x),`add.image(500, 325, "town").setDisplaySize(1000, 650)`,顺带解决现在 FIT 拉伸发虚的问题。
+
+- **路线 1(推荐):免费像素素材拼底图**。用 CC0 素材包 Ninja Adventure(pixel-boy.itch.io/ninja-adventure,含完整村庄 tileset + 角色)或 Kenney RPG 系列,在 Tiled 里按现有 5 地点布局拼一张小镇,**导出为整张 PNG** 放入 `public/assets/town.png`,再按 outline.md §6 色板整体调色。
+- **路线 2:AI 生成整张底图**。按 outline.md §6 给图像模型出图:「俯视 45° 像素风劫后小镇,橄榄绿+灰褐+暖橙,五个区域(杂物铺/修理棚/瞭望塔/温室/中央广场水潭),位置对应现有坐标布局」,生成后人工核对地点与锚点对齐。风险:出图位置对不上时需要微调锚点。
+- **NPC 精灵换装**:用素材包的 4 方向行走 spritesheet(每人 3–4 帧×4 向),按 outline.md 各角色主色改色;`walkActor` 播放对应朝向行走动画,到达后停 idle 帧。程序绘制小人退役。
+- **氛围层次序**:底图 → NPC 精灵 → 篝火光晕 → 夜色/雾 → 纸纹。夜色矩形与雾保留现有实现即可。
+- **版权注记**:README 素材来源一节列明素材包与许可(CC0/署名)。
+
+### 验收标准（v2.1）
+
+1. 首屏是一张有质感的像素小镇底图,NPC 是有行走动画的像素精灵,无几何色块裸露;
+2. 连续推进 20 tick + 开关对话 5 次,`tweens.getTweens().length` 稳定,Chrome Performance 面板无持续增长的帧耗时;
+3. 常态 60fps,对话开启瞬间无明显掉帧;
+4. 立绘全部 ≤150KB,首次打开对话无加载闪烁。
+
+## v2.1 Todo
+
+- [ ] P1 修 tween 泄漏(syncWorld 去重 + walkActor 全量 kill)并用 getTweens 自验（实现与调试计数入口已完成；当前无可连接浏览器，20 tick 控制台计数待复核）
+- [x] P2 世界更新去抖(tick_index 比较 + SSE 节流)
+- [x] P3 去 mix-blend-mode / 收敛 backdrop-filter 至 1 处
+- [x] P4 立绘转 WebP ≤150KB + 预载 + 去 drop-shadow filter
+- [x] P5 Phaser 强制 WEBGL + high-performance
+- [x] A1 采用路线 2，生成并接入 2000×1300 原创小镇底图
+- [x] A2 NPC 换 4 向 × 3 帧行走 spritesheet + 朝向动画
+- [x] A3 氛围层重排(底图/精灵/光晕/夜雾/纸纹)+ README 素材许可注记
