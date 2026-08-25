@@ -157,7 +157,7 @@ AI 小镇 Web 游戏
 ## M4 — 工程收尾
 - [x] pytest：决策校验 / mock 确定性 / 保存恢复往返（现有 8 项核心测试）
 - [x] README + 技术方案文档（含关键决策与一处 AI 修改案例）
-- [ ] Docker Compose + Caddy 部署到自有服务器，验证公网可访问（homelab + Tailscale 部署已完成；公网域名与 HTTPS 待配置）
+- [ ] Docker Compose + Caddy 部署到自有服务器，验证公网可访问（Compose 部署已验证；仓库不记录私有部署地址）
 - [ ] 录制 3–5 分钟演示视频（小镇总览 → NPC 自主行动 → 对话 → 拔掉密钥演示降级）
 
 ---
