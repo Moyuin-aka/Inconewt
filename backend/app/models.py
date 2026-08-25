@@ -54,11 +54,29 @@ class NPCNeeds(BaseModel):
     social: int = Field(default=25, ge=0, le=100)
 
 
+class NPCIntent(BaseModel):
+    """Provider 提出的通用世界行为；具体白名单由数据文件定义。"""
+
+    verb: str = Field(min_length=1, max_length=32)
+    args: dict[str, str] = Field(default_factory=dict)
+    because: str = Field(default="", max_length=160)
+
+
+class QueuedNPCIntent(NPCIntent):
+    player_message: str = Field(min_length=1, max_length=500)
+    source: Literal["mock", "deepseek"] = "mock"
+    enqueued_tick: int = Field(ge=0)
+
+
 class NPCState(BaseModel):
     location: str
     action: NPCAction = Field(default_factory=NPCAction)
     needs: NPCNeeds = Field(default_factory=NPCNeeds)
     mood: str = "平静"
+    following_player: bool = False
+    following_source: Literal["mock", "deepseek"] = "mock"
+    following_reason: str = ""
+    intent_queue: list[QueuedNPCIntent] = Field(default_factory=list, max_length=8)
 
 
 class ActionRecord(BaseModel):
@@ -224,6 +242,8 @@ class ChatResponse(BaseModel):
     affinity_delta: int = 0
     impression: str | None = None
     completed_quest_id: str | None = None
+    intents: list[NPCIntent] = Field(default_factory=list)
+    revealed_secret_id: str | None = None
 
 
 class WorldActionRequest(BaseModel):
@@ -240,6 +260,24 @@ class PlayerMoveRequest(BaseModel):
 
 class PlayerAppearanceRequest(BaseModel):
     appearance: Literal["moss", "ember", "slate"]
+
+
+class PlayerNameRequest(BaseModel):
+    name: str = Field(default="外来者", min_length=1, max_length=16)
+
+
+class SaveRequest(BaseModel):
+    slot: int = Field(ge=1, le=3)
+
+
+class LoadRequest(BaseModel):
+    slot: int = Field(ge=0, le=3)
+    kind: Literal["auto", "manual"] = "manual"
+
+
+class ImportSaveRequest(BaseModel):
+    schema_version: int
+    world: dict
 
 
 class ScavengeRequest(BaseModel):

@@ -3,23 +3,32 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
-from .models import DailyPlan, Decision, InteractionLine, InteractionScript, NPC, PlanItem, WishQuest, WorldSnapshot
+from .grounding import build_fact_card, eligible_secrets, mock_secret_for_message, unknown_subject
+from .intents import prompt_capabilities
+from .models import DailyPlan, Decision, InteractionLine, InteractionScript, NPC, NPCIntent, PlanItem, WishQuest, WorldSnapshot
 
 
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 
+class AIBudgetExceeded(RuntimeError):
+    pass
+
+
 class AIService:
     """真实 AI、计划生成、NPC 互动与 Mock 降级的统一入口。"""
 
-    def __init__(self) -> None:
+    def __init__(self, budget_consumer: Callable[[], bool] | None = None) -> None:
         self.provider = os.getenv("AI_PROVIDER", "mock").strip().lower()
         self.api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
         self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
         self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+        self.budget_consumer = budget_consumer
+        self.budget_exhausted = False
 
     @property
     def configured_mode(self) -> str:
@@ -69,24 +78,28 @@ class AIService:
                 memory = "\n".join(npc.memory.short_term[-16:])
                 return (await self._request([
                     {"role": "system", "content": system},
-                    {"role": "user", "content": f"把以下记忆压缩成第一人称日记，60字以内，只写日记正文：\n{memory}"},
-                ])).strip()
+                    {"role": "user", "content": (
+                        "把以下由后端记录的真实记忆压缩成第一人称日记，60字以内，只写日记正文。"
+                        "只能总结原文明确发生的事件，不补全、不推测、不新增人名、地点、物品或事件：\n"
+                        f"{memory}"
+                    )},
+                ], temperature=0.3)).strip()
             except Exception:
                 pass
         return f"这些时辰里，我记得：{'；'.join(npc.memory.short_term[-4:])[:110]}"
 
-    async def chat(self, npc: NPC, message: str, world: WorldSnapshot) -> tuple[str, str, str | None, int, str]:
+    async def chat(self, npc: NPC, message: str, world: WorldSnapshot) -> tuple[str, str, str | None, int, str, list[NPCIntent], str | None]:
         if self.configured_mode == "deepseek":
             try:
-                reply, delta, impression = await self._deepseek_chat(npc, message, world)
-                return reply, "deepseek", None, delta, impression
+                reply, delta, impression, intents, revealed = await self._deepseek_chat(npc, message, world)
+                return reply, "deepseek", None, delta, impression, intents, revealed
             except Exception as exc:
                 fallback = f"DeepSeek 调用失败，已自动降级：{type(exc).__name__}"
-                reply, delta, impression = self.mock_chat(npc, message, world)
-                return reply, "mock", fallback, delta, impression
+                reply, delta, impression, intents, revealed = self.mock_chat(npc, message, world)
+                return reply, "mock", fallback, delta, impression, intents, revealed
         reason = None if self.provider == "mock" else "未填写 DEEPSEEK_API_KEY，已使用 Mock"
-        reply, delta, impression = self.mock_chat(npc, message, world)
-        return reply, "mock", reason, delta, impression
+        reply, delta, impression, intents, revealed = self.mock_chat(npc, message, world)
+        return reply, "mock", reason, delta, impression, intents, revealed
 
     async def make_wish(self, npc: NPC, world: WorldSnapshot) -> tuple[WishQuest, str | None]:
         """心愿也走 Provider 抽象；真实调用失败时完整退回可玩的规则版本。"""
@@ -97,12 +110,13 @@ class AIService:
                 return self.mock_wish(npc, world), f"心愿生成失败，已使用 Mock：{type(exc).__name__}"
         return self.mock_wish(npc, world), None
 
-    async def _request(self, messages: list[dict[str, str]], json_mode: bool = False) -> str:
+    async def _request(self, messages: list[dict[str, str]], json_mode: bool = False, temperature: float = 0.6) -> str:
         payload: dict = {
             "model": self.model,
             "messages": messages,
             "stream": False,
             "max_tokens": 650,
+            "temperature": temperature,
             "thinking": {"type": "disabled"},
         }
         if json_mode:
@@ -110,6 +124,9 @@ class AIService:
         last_error: Exception | None = None
         for _ in range(2):
             try:
+                if self.budget_consumer is not None and not self.budget_consumer():
+                    self.budget_exhausted = True
+                    raise AIBudgetExceeded("本世界今日 AI 调用额度已用完")
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     response = await client.post(
                         f"{self.base_url}/chat/completions",
@@ -118,6 +135,8 @@ class AIService:
                     )
                     response.raise_for_status()
                     return response.json()["choices"][0]["message"]["content"]
+            except AIBudgetExceeded:
+                raise
             except (httpx.HTTPError, KeyError, TypeError) as exc:
                 last_error = exc
         raise RuntimeError("DeepSeek request failed") from last_error
@@ -144,12 +163,14 @@ class AIService:
                 "your_impression": world.player.relationships.get(npc.id).model_dump()
                 if world.player.relationships.get(npc.id) else None,
             },
+            "current_facts": build_fact_card(world, npc),
         }
         if avoid_signature:
             context["must_avoid"] = f"你已经做这件事很久了，本次不得重复：{avoid_signature}"
         raw = await self._request(
             [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
             json_mode=True,
+            temperature=0.3,
         )
         return Decision.model_validate_json(raw)
 
@@ -163,11 +184,12 @@ class AIService:
             "activities": [item.model_dump() for item in npc.profile.activities],
             "locations": [item.id for item in world.locations],
             "other_npcs": [item.id for item in world.npcs if item.id != npc.id],
+            "current_facts": build_fact_card(world, npc),
         }
         data = json.loads(await self._request([
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-        ], json_mode=True))
+        ], json_mode=True, temperature=0.3))
         items = [PlanItem(id=f"d{world.day}-ai-{index}", **item) for index, item in enumerate(data["items"][:5])]
         return DailyPlan(day=world.day, summary=data["summary"], items=items, source="deepseek")
 
@@ -179,17 +201,18 @@ class AIService:
             "weather": world.weather,
             "first": {"id": first.id, "persona": first.profile.personality, "memory": first.memory.short_term[-3:]},
             "second": {"id": second.id, "persona": second.profile.personality, "memory": second.memory.short_term[-3:]},
+            "current_facts": build_fact_card(world, first),
         }
         raw = await self._request([
             {"role": "system", "content": "你在新螈镇编写克制、温暖、符合人设的日常偶遇。"},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-        ], json_mode=True)
+        ], json_mode=True, temperature=0.6)
         script = InteractionScript.model_validate_json(raw)
         if any(line.speaker not in {first.id, second.id} for line in script.lines):
             raise ValueError("interaction speaker is invalid")
         return script
 
-    async def _deepseek_chat(self, npc: NPC, message: str, world: WorldSnapshot) -> tuple[str, int, str]:
+    async def _deepseek_chat(self, npc: NPC, message: str, world: WorldSnapshot) -> tuple[str, int, str, list[NPCIntent], str | None]:
         system = self._assembled_prompt(npc, decision=False)
         history = "\n".join(npc.memory.short_term[-8:])
         location = next((item for item in world.locations if item.id == npc.state.location), None)
@@ -198,8 +221,22 @@ class AIService:
         carried = [item.text for item in world.player.carried_messages if item.to_npc_id == npc.id]
         wish = next((item for item in world.quests if item.giver_id == npc.id and item.status != "completed"), None)
         context = {
-            "task": "回应玩家，并顺带更新你对玩家的一句印象。只输出JSON。",
-            "schema": {"reply": "1到3句角色台词", "affinity_delta": "-2到3的整数", "impression": "20字内印象"},
+            "task": (
+                "回应玩家，更新一句印象，并从封闭能力表中识别0到4个世界行为。"
+                "只有你依人设与关系此刻愿意做的事才能放入intents；可以在reply中拒绝并返回空数组。"
+                "不要为意图识别另开调用，只输出JSON。"
+            ),
+            "schema": {
+                "reply": "1到3句角色台词",
+                "affinity_delta": "-2到3的整数",
+                "impression": "20字内印象",
+                "reveal_secret_id": "仅当事实卡标注may_reveal=true且本轮确实要引出时填写secret id，否则null",
+                "intents": [{
+                    "verb": "能力表中的verb",
+                    "args": {"参数名": "能力表给出的真实id或转告文本"},
+                    "because": "为何愿意这样做，简短引用玩家意思",
+                }],
+            },
             "place": location.name if location else npc.state.location,
             "time": f"第{world.day}天 {world.minute // 60:02d}:{world.minute % 60:02d}",
             "weather": world.weather,
@@ -208,16 +245,32 @@ class AIService:
             "carried_messages_for_me": carried,
             "active_wish": wish.model_dump() if wish else None,
             "today_plan": npc.plan.summary,
+            "world_capabilities": prompt_capabilities(npc, world),
+            "current_facts": build_fact_card(world, npc),
             "recent_memory": history,
             "player_message": message,
         }
         raw = await self._request([
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-        ], json_mode=True)
+        ], json_mode=True, temperature=0.6)
         data = json.loads(raw)
         delta = max(-2, min(3, int(data.get("affinity_delta", 1))))
-        return str(data["reply"]).strip(), delta, str(data["impression"]).strip()[:40]
+        intents: list[NPCIntent] = []
+        raw_intents = data.get("intents", [])
+        if isinstance(raw_intents, list):
+            for item in raw_intents[:4]:
+                try:
+                    intents.append(NPCIntent.model_validate(item))
+                except (TypeError, ValueError):
+                    continue
+        reveal_id = data.get("reveal_secret_id")
+        secrets = {item["id"]: item for item in eligible_secrets(npc, world)}
+        revealed = reveal_id if reveal_id in secrets else None
+        reply = str(data["reply"]).strip()
+        if revealed:
+            reply = f"{reply}\n{secrets[revealed]['text']}"
+        return reply, delta, str(data["impression"]).strip()[:40], intents, revealed
 
     async def _deepseek_wish(self, npc: NPC, world: WorldSnapshot) -> WishQuest:
         context = {
@@ -231,11 +284,12 @@ class AIService:
             "locations": [item.id for item in world.locations],
             "npcs": [item.id for item in world.npcs if item.id != npc.id],
             "items": [item.item.model_dump() for item in world.scavenge_points],
+            "current_facts": build_fact_card(world, npc),
         }
         data = json.loads(await self._request([
             {"role": "system", "content": self._assembled_prompt(npc, decision=False)},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-        ], json_mode=True))
+        ], json_mode=True, temperature=0.6))
         return WishQuest(
             id=f"wish-{npc.id}-d{world.day}-{world.tick_index}", giver_id=npc.id,
             type=data["type"], title=data["title"], description=data["description"],
@@ -325,35 +379,77 @@ class AIService:
         return InteractionScript(lines=lines)
 
     @staticmethod
-    def mock_chat(npc: NPC, message: str, world: WorldSnapshot) -> tuple[str, int, str]:
+    def mock_chat(npc: NPC, message: str, world: WorldSnapshot) -> tuple[str, int, str, list[NPCIntent], str | None]:
         place = next((item.name for item in world.locations if item.id == npc.state.location), "镇上的旧路")
         others = [item.profile.name for item in world.npcs if item.id != npc.id and item.state.location == npc.state.location]
         scene = f"这里是{place}" + (f"，{others[0]}也在" if others else "")
+        unknown = unknown_subject(message, world)
+        if unknown:
+            replies = {
+                "momo": "这名字像一张没写进账本的标签。我没听说过，先不替它添故事。",
+                "lili": "没听说过呀。回头我帮你问问，先吃饭。",
+                "xiaoke": "啥？没听说过！镇上没有这个！",
+                "ajie": "不知道。镇上没有这回事。",
+            }
+            return replies[npc.id], 0, "会问些镇外的事，但没有强迫我猜。", [], None
+        secret = mock_secret_for_message(npc, message, world)
+        if secret:
+            leads = {
+                "momo": "既然你一直记着……我只说账本里确实留下的那一页。",
+                "lili": "这事我记得清楚，不用添油加醋。",
+                "xiaoke": "这个我可记得！不是传闻，是确实发生过的！",
+                "ajie": "可以说。只说事实。",
+            }
+            return f"{leads[npc.id]}\n{secret['text']}", 1, "已经可以托付一小段旧事。", [], secret["id"]
+        intents = AIService._mock_intents(message)
         carried = next((item for item in world.player.carried_messages if item.to_npc_id == npc.id), None)
         wish = next((item for item in world.quests if item.giver_id == npc.id and item.status == "offered"), None)
         if carried:
             message = f"{message}（并转告：{carried.text}）"
         positive = any(word in message for word in ("谢谢", "帮", "喜欢", "放心", "带来", "转告"))
         delta = 2 if positive else 1
+        if intents:
+            if intents[0].verb == "stop_following":
+                replies = {"momo": "好。我就在这里。", "lili": "好吧，那你路上慢一点！", "xiaoke": "收到！我先不跟啦！", "ajie": "嗯。注意安全。"}
+                return replies[npc.id], 1, "会清楚告诉我自己的打算。", intents, None
+            replies = {
+                "momo": "好。你带路吧。",
+                "lili": "好呀！等等我，我跟你走！",
+                "xiaoke": "走！我跟上了！",
+                "ajie": "嗯。带路。",
+            }
+            return replies[npc.id], 2, "愿意邀请我一起走，不只把我当作路标。", intents, None
         if npc.id == "momo":
             reply = "那件事像一台只剩杂音的收音机。先坐一会儿吧，我记得你说过的话。" if "劫" in message else f"{scene}。我记住了，你说的“{message[:18]}”，值得收进抽屉里。"
             if wish:
                 reply += f" 如果你路过巴士站……我在找「{wish.title}」里提到的东西。"
-            return reply, delta, "愿意替人捎话，也记得倾听。" if carried else "这个外来者说话不急，像是愿意听完。"
+            return reply, delta, "愿意替人捎话，也记得倾听。" if carried else "这个外来者说话不急，像是愿意听完。", intents, None
         if npc.id == "lili":
             reply = "那边的事先放一放。来看看这株新芽，活着的东西更要紧。" if "劫" in message else f"{scene}。听见啦！“{message[:18]}”是吧？先喝汤，我们边吃边说。"
             if wish:
                 reply += f" 对了，能不能帮我一件小事——{wish.description}"
-            return reply, delta, "肯停下来喝汤，是个会照顾自己的人。"
+            return reply, delta, "肯停下来喝汤，是个会照顾自己的人。", intents, None
         if npc.id == "xiaoke":
             reply = f"{scene}！“{message[:18]}”？懂了！给我一点时间，包修好的！"
             if wish:
                 reply += f" 顺便！{wish.description}"
-            return reply, delta, "对镇外的东西见得多，应该很好聊！"
+            return reply, delta, "对镇外的东西见得多，应该很好聊！", intents, None
         reply = "嗯。风大。别往废墟方向走。" if "劫" in message or "废墟" in message else f"{scene}。听见了。镇子安全。"
         if wish:
             reply += f" 还有件事。{wish.description}"
-        return reply, delta, "没有越界。暂时可信。" if positive else "仍需观察。"
+        return reply, delta, "没有越界。暂时可信。" if positive else "仍需观察。", intents, None
+
+    @staticmethod
+    def _mock_intents(message: str) -> list[NPCIntent]:
+        """Mock 只保留原有同行/停止最低体验，不扩展自由意图关键词。"""
+        normalized = "".join(message.lower().split())
+        stop_phrases = ("别跟", "不用跟", "不要跟", "留在这里", "先留在", "你留下", "到这里就好")
+        if any(phrase in normalized for phrase in stop_phrases):
+            return [NPCIntent(verb="stop_following", because="玩家明确说不用继续同行。")]
+        follow_phrases = ("跟我走", "跟我来", "一起去", "陪我去", "一道去", "跟我一起", "我们去", "一起看看", "一起吃")
+        if not any(phrase in normalized for phrase in follow_phrases):
+            return []
+        return [NPCIntent(verb="follow_player", because="玩家邀请我一起走。")]
 
     @staticmethod
     def mock_wish(npc: NPC, world: WorldSnapshot) -> WishQuest:

@@ -43,7 +43,7 @@ export function PlayerDock({ world, nearbyNpc, onNotebook, onObserver, onAppeara
         {atSquare && <button onClick={() => onWish(world.weather === "雾" ? "晴" : "雾")} disabled={world.tick_index < world.player.weather_cooldown_until}>蝾螈许愿</button>}
         <button onClick={() => onNotebook("quests")}>心愿 <b>{activeCount}</b></button>
         <button onClick={() => onNotebook("journal")}>手记 <b>{world.player.journal.length}</b></button>
-        <button onClick={onObserver}>观察者模式</button>
+        <button onClick={onObserver}>存档与设置</button>
       </div>
       <div className="move-hint"><kbd>WASD</kbd><span>或点击地面移动</span></div>
     </section>

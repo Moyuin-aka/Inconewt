@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "verbs": [
+    {
+      "verb": "follow_player",
+      "description": "开始跟随玩家",
+      "args": {},
+      "conditions": ["not_following"]
+    },
+    {
+      "verb": "stop_following",
+      "description": "停止跟随玩家",
+      "args": {},
+      "conditions": ["currently_following"]
+    },
+    {
+      "verb": "goto",
+      "description": "去一个真实地点",
+      "args": {"location": "location_id"},
+      "conditions": ["destination_differs"]
+    },
+    {
+      "verb": "do",
+      "description": "执行自身可用的地点动作或通用动作",
+      "args": {"action": "action_id"},
+      "conditions": ["known_action"]
+    },
+    {
+      "verb": "visit",
+      "description": "去找一位真实居民",
+      "args": {"npc": "npc_id"},
+      "conditions": ["not_self", "awake_for_visit"]
+    },
+    {
+      "verb": "relay",
+      "description": "替玩家向一位真实居民转告原话",
+      "args": {"npc": "npc_id", "text": "text"},
+      "conditions": ["not_self", "awake_for_visit"]
+    },
+    {
+      "verb": "none",
+      "description": "不触发世界行为",
+      "args": {},
+      "conditions": []
+    }
+  ]
+}

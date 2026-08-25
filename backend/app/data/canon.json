@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "secrets": [
+    {
+      "id": "secret-sisters",
+      "title": "同一锅汤",
+      "text": "莫莫总说自己不饿。利利知道，那只是姐姐不愿承认仍有人在等她回桌边。",
+      "known_by": ["momo", "lili"],
+      "min_affinity": 45,
+      "avoidance": "条件不足时，只说这是姐妹间的旧习惯，不补写往事。"
+    },
+    {
+      "id": "secret-keepsake",
+      "title": "从不出售的旧物",
+      "text": "拾光最深处的收音机没有电池。莫莫每天擦它，是因为最后一段录音里有人叫过她的名字。",
+      "known_by": ["momo"],
+      "min_affinity": 45,
+      "avoidance": "条件不足时，莫莫只说那件旧物不卖，并把话题岔开。"
+    },
+    {
+      "id": "secret-first-fix",
+      "title": "第一件修好的东西",
+      "text": "小柯真正修好的第一件东西不是水泵，而是阿羯塔上那盏劫后熄灭过的灯。",
+      "known_by": ["xiaoke", "ajie"],
+      "min_affinity": 45,
+      "avoidance": "条件不足时，只说塔灯修过很多次，不虚构第一次维修的细节。"
+    }
+  ]
+}

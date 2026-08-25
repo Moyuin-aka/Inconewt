@@ -21,6 +21,8 @@ export interface NPC {
     action: { type: string; target: string | null; activity_id: string | null; say: string; reason: string; source: ActionSource };
     needs: { energy: number; hunger: number; social: number };
     mood: string;
+    following_player: boolean;
+    intent_queue: Array<{ verb: string; args: Record<string, string>; because: string }>;
   };
   memory: {
     short_term: string[]; diary: string[];
@@ -67,8 +69,34 @@ export interface World {
 
 export interface Health { status: string; ai_mode: ActionSource; model: string; }
 
+export interface SessionInfo {
+  world_id: string; is_new: boolean; recovered: boolean; player_name: string; updated_at: string;
+  access_mode: "interactive" | "observer"; active_worlds: number; max_active_worlds: number;
+  ai_mode: ActionSource; ai_budget_exhausted: boolean; ai_calls_today: number; ai_daily_limit: number;
+}
+
+export interface SaveInfo {
+  id: number; slot: number; kind: "auto" | "manual"; created_at: string;
+  schema_version: number; day: number; minute: number; tick_index: number;
+}
+
+const WORLD_ID_KEY = "inconewt.world_id";
+
+function recoveryHeader(): Record<string, string> {
+  const saved = window.localStorage.getItem(WORLD_ID_KEY);
+  return saved ? { "X-World-Id": saved } : {};
+}
+
+export function rememberWorldId(worldId: string) {
+  window.localStorage.setItem(WORLD_ID_KEY, worldId);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...init, headers: { "Content-Type": "application/json", ...init?.headers } });
+  const response = await fetch(path, {
+    ...init,
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...recoveryHeader(), ...init?.headers },
+  });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     throw new Error(body?.detail ?? `请求失败（${response.status}）`);
@@ -80,10 +108,11 @@ async function chatStream(
   npcId: string,
   message: string,
   onDelta: (delta: string) => void,
-): Promise<{ reply: string; source: ActionSource; fallbackReason?: string; affinityDelta: number; impression?: string; completedQuestId?: string }> {
+): Promise<{ reply: string; source: ActionSource; fallbackReason?: string; affinityDelta: number; impression?: string; completedQuestId?: string; revealedSecretId?: string }> {
   const response = await fetch(`/api/chat/${npcId}/stream`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...recoveryHeader() },
     body: JSON.stringify({ message }),
   });
   if (!response.ok || !response.body) throw new Error(`对话连接失败（${response.status}）`);
@@ -95,6 +124,7 @@ async function chatStream(
   let affinityDelta = 0;
   let impression: string | undefined;
   let completedQuestId: string | undefined;
+  let revealedSecretId: string | undefined;
   while (true) {
     const { value, done } = await reader.read();
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
@@ -110,6 +140,7 @@ async function chatStream(
         affinityDelta = event.affinity_delta ?? 0;
         impression = event.impression || undefined;
         completedQuestId = event.completed_quest_id || undefined;
+        revealedSecretId = event.revealed_secret_id || undefined;
       } else if (event.type === "delta") {
         reply += event.delta;
         onDelta(event.delta);
@@ -117,10 +148,17 @@ async function chatStream(
     }
     if (done) break;
   }
-  return { reply, source, fallbackReason, affinityDelta, impression, completedQuestId };
+  return { reply, source, fallbackReason, affinityDelta, impression, completedQuestId, revealedSecretId };
 }
 
 export const api = {
+  session: () => request<SessionInfo>("/api/session"),
+  startSession: (name: string) => request<World>("/api/session/start", {
+    method: "POST", body: JSON.stringify({ name }),
+  }),
+  restartSession: (name: string) => request<SessionInfo>("/api/session/restart", {
+    method: "POST", body: JSON.stringify({ name }),
+  }),
   world: () => request<World>("/api/world"),
   health: () => request<Health>("/api/health"),
   tick: () => request<World>("/api/world/tick", { method: "POST" }),
@@ -147,6 +185,19 @@ export const api = {
   wishWeather: (weather: "晴" | "雾") => request<World>("/api/wish-weather", {
     method: "POST", body: JSON.stringify({ weather }),
   }),
-  save: () => request<{ message: string; save_id: number }>("/api/world/save", { method: "POST" }),
-  load: () => request<World>("/api/world/load", { method: "POST" }),
+  saves: () => request<{ saves: SaveInfo[] }>("/api/world/saves"),
+  save: (slot: number) => request<{ message: string; save_id: number; slot: number }>("/api/world/save", {
+    method: "POST", body: JSON.stringify({ slot }),
+  }),
+  load: (slot: number, kind: "auto" | "manual" = "manual") => request<World>("/api/world/load", {
+    method: "POST", body: JSON.stringify({ slot, kind }),
+  }),
+  exportWorld: async () => {
+    const response = await fetch("/api/world/export", { credentials: "include", headers: recoveryHeader() });
+    if (!response.ok) throw new Error("导出存档失败");
+    return response.blob();
+  },
+  importWorld: (bundle: unknown) => request<World>("/api/world/import", {
+    method: "POST", body: JSON.stringify(bundle),
+  }),
 };

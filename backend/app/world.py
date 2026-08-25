@@ -6,16 +6,21 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from .ai import AIService
+from .grounding import eligible_secrets, get_secret, memory_text_is_safe, unknown_subject
+from .intents import structurally_valid
 from .models import (
     ActionRecord,
     CarriedMessage,
     ChatResponse,
+    Decision,
     GiftRequest,
     JournalSecret,
     NPC,
     NPCAction,
+    NPCIntent,
     PlayerAppearanceRequest,
     PlayerMoveRequest,
+    QueuedNPCIntent,
     Relationship,
     ScavengeRequest,
     WeatherWishRequest,
@@ -26,7 +31,7 @@ from .models import (
     initial_world,
     upgrade_world,
 )
-from .store import WorldStore
+from .store import DEFAULT_WORLD_ID, WorldStore
 
 
 class EventBus:
@@ -38,11 +43,16 @@ class EventBus:
             if not queue.full():
                 queue.put_nowait(event.model_dump_json())
 
-    async def stream(self):
+    async def stream(self, heartbeat=None):
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
         self.subscribers.add(queue)
+        last_mode: str | None = None
         try:
             while True:
+                mode = heartbeat() if heartbeat else "interactive"
+                if mode != last_mode:
+                    yield f"event: session\ndata: {{\"access_mode\":\"{mode}\"}}\n\n"
+                    last_mode = mode
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=20)
                     yield f"event: world\ndata: {payload}\n\n"
@@ -55,10 +65,11 @@ class EventBus:
 class WorldEngine:
     """v2 世界循环：计划 → 决策 → 行动 → 互动 → 记忆/日记 → 次日计划。"""
 
-    def __init__(self, store: WorldStore, ai: AIService) -> None:
+    def __init__(self, store: WorldStore, ai: AIService, world_id: str = DEFAULT_WORLD_ID) -> None:
         self.store = store
         self.ai = ai
-        loaded = store.load_current()
+        self.world_id = world_id
+        loaded = store.load_current(world_id)
         self.world = loaded or initial_world()
         if (
             self.world.schema_version < 3
@@ -66,7 +77,7 @@ class WorldEngine:
             or any(not npc.plan.items for npc in self.world.npcs)
         ):
             self.world = upgrade_world(self.world)
-        self.store.save_current(self.world)
+        self.store.save_current(self.world, self.world_id)
         self.lock = asyncio.Lock()
         self.events = EventBus()
 
@@ -94,9 +105,22 @@ class WorldEngine:
                 self._age_needs(npc)
                 previous = npc.memory.action_history[-1] if npc.memory.action_history else None
                 avoid = f"{previous.type}|{previous.reason}" if previous else None
-                decision, source, fallback = await self.ai.decide(npc, self.world)
+                queued_intent = self._pop_next_intent(npc)
+                intent_narrative: str | None = None
+                intent_participants = [npc.id]
+                if queued_intent:
+                    decision, intent_narrative, intent_participants = self._decision_for_intent(npc, queued_intent)
+                    source, fallback = queued_intent.source, None
+                elif npc.state.following_player:
+                    decision = Decision(
+                        action="visit", target=self.world.player.location, say="我跟着。",
+                        reason=npc.state.following_reason or "已经答应与外来者同行，先跟上脚步。",
+                    )
+                    source, fallback = npc.state.following_source, None
+                else:
+                    decision, source, fallback = await self.ai.decide(npc, self.world)
                 signature = f"{decision.action}|{decision.reason}"
-                if signature == avoid:
+                if signature == avoid and not npc.state.following_player and not queued_intent:
                     decision, source, retry_fallback = await self.ai.decide(npc, self.world, avoid)
                     fallback = retry_fallback or fallback
 
@@ -110,7 +134,7 @@ class WorldEngine:
                 )
                 self._apply_decision(npc)
                 self._complete_plan_item(npc)
-                narrative = self._narrative_for_action(npc)
+                narrative = intent_narrative or self._narrative_for_action(npc)
                 if fallback:
                     narrative += f"（{fallback}）"
                 self._remember(npc, narrative)
@@ -122,7 +146,7 @@ class WorldEngine:
                     activity_id=decision.activity_id,
                     reason=decision.reason,
                 )])[-12:]
-                event = self._event("npc_action", narrative, [npc.id])
+                event = self._event("npc_intent" if queued_intent else "npc_action", narrative, intent_participants)
                 self._append_event(event)
                 await self.events.publish(event)
 
@@ -131,6 +155,8 @@ class WorldEngine:
             await self._ensure_quest_pool()
             await self._summarize_full_memories()
             self._touch_and_persist()
+            if self.world.tick_index % 10 == 0:
+                self.store.create_save(self.world, slot=0, kind="auto", world_id=self.world_id)
             return self.snapshot()
 
     async def chat(self, npc_id: str, message: str) -> ChatResponse:
@@ -138,15 +164,20 @@ class WorldEngine:
             npc = self.get_npc(npc_id)
             if not self._player_near_npc(npc):
                 raise PermissionError("要走近居民才能交谈")
-            reply, source, fallback, affinity_delta, impression = await self.ai.chat(npc, message, self.world)
-            self._remember(npc, f"玩家说：{message}")
-            self._remember(npc, f"{npc.profile.name}回答：{reply}")
+            reply, source, fallback, affinity_delta, impression, proposed_intents, revealed_secret_id = await self.ai.chat(npc, message, self.world)
             relation = self.world.player.relationships.setdefault(npc.id, Relationship(affinity=0, impression="仍是陌生人。"))
             relation.affinity = max(-100, min(100, relation.affinity + affinity_delta))
             relation.impression = impression
             npc.state.needs.social = max(0, npc.state.needs.social - 18)
             npc.state.mood = "被理解"
             completed = self._complete_quest_from_chat(npc)
+            accepted_intents = self._enqueue_intents(npc, proposed_intents, message, source)
+            eligible_secret_ids = {item["id"] for item in eligible_secrets(npc, self.world)}
+            if revealed_secret_id not in eligible_secret_ids:
+                revealed_secret_id = None
+            if revealed_secret_id:
+                self._unlock_secret(revealed_secret_id, npc.profile.name)
+            self._remember(npc, self._chat_memory(npc, message, accepted_intents, revealed_secret_id))
             event = self._event("chat", f"{self._period()}，你在{self._location_name(npc.state.location)}与{npc.profile.name}聊了一会儿。TA 对你的印象有了变化。", [npc.id])
             self._append_event(event)
             self._touch_and_persist()
@@ -157,6 +188,8 @@ class WorldEngine:
                 reply=reply, source=source, fallback_reason=fallback,
                 affinity_delta=affinity_delta, impression=impression,
                 completed_quest_id=completed[0].id if completed else None,
+                intents=accepted_intents,
+                revealed_secret_id=revealed_secret_id,
             )
 
     async def move_player(self, request: PlayerMoveRequest) -> WorldSnapshot:
@@ -166,6 +199,20 @@ class WorldEngine:
             self.world.player.x = request.x
             self.world.player.y = request.y
             self.world.player.location = request.location
+            for npc in [item for item in self.world.npcs if item.state.following_player]:
+                if npc.state.location == request.location:
+                    continue
+                npc.state.location = request.location
+                npc.state.action = NPCAction(
+                    type="visit", target=request.location, say="等等我。",
+                    reason=npc.state.following_reason or "答应了同行，正沿路跟着外来者。",
+                    source=npc.state.following_source,
+                )
+                text = f"{self._period()}，{npc.profile.name}跟着你走向{self._location_name(request.location)}。"
+                self._remember(npc, text)
+                event = self._event("companion_follow", text, [npc.id])
+                self._append_event(event)
+                await self.events.publish(event)
             self._touch_and_persist()
             return self.snapshot()
 
@@ -302,12 +349,12 @@ class WorldEngine:
             await self.events.publish(event)
             return self.snapshot()
 
-    def save(self) -> int:
-        return self.store.create_save(self.world)
+    def save(self, slot: int = 1) -> int:
+        return self.store.create_save(self.world, slot=slot, kind="manual", world_id=self.world_id)
 
-    async def load(self) -> WorldSnapshot:
+    async def load(self, slot: int = 1, kind: str = "manual") -> WorldSnapshot:
         async with self.lock:
-            loaded = self.store.load_latest_save()
+            loaded = self.store.load_save(slot=slot, kind=kind, world_id=self.world_id)
             if not loaded:
                 raise LookupError("还没有可恢复的存档")
             needs_upgrade = (
@@ -320,6 +367,25 @@ class WorldEngine:
             self._append_event(event)
             self._touch_and_persist()
             await self.events.publish(event)
+            return self.snapshot()
+
+    async def set_player_name(self, name: str) -> WorldSnapshot:
+        async with self.lock:
+            self.world.player.name = name.strip() or "外来者"
+            self._touch_and_persist()
+            self.store.mark_started(self.world_id)
+            return self.snapshot()
+
+    async def import_snapshot(self, payload: dict) -> WorldSnapshot:
+        imported = WorldSnapshot.model_validate(payload)
+        if imported.schema_version != 3:
+            raise ValueError(f"存档版本 {imported.schema_version} 不兼容，当前需要版本 3")
+        if len(imported.npcs) != 4 or len(imported.locations) != 7:
+            raise ValueError("存档内容不完整，无法导入")
+        async with self.lock:
+            self.world = imported
+            self.store.save_current(self.world, self.world_id)
+            self.store.mark_started(self.world_id)
             return self.snapshot()
 
     async def _start_new_day(self) -> None:
@@ -356,7 +422,7 @@ class WorldEngine:
             transcript_parts.append(f"{speaker.profile.name}：“{line.text}”")
         transcript = "  ".join(transcript_parts)
         location = self._location_name(first.state.location)
-        memory = f"{self.time_label()}在{location}偶遇：{transcript}"
+        memory = f"{self.time_label()}，{first.profile.name}与{second.profile.name}在{location}相遇并交谈。"
         self._remember(first, memory)
         self._remember(second, memory)
         self._increase_affinity(first, second)
@@ -446,14 +512,11 @@ class WorldEngine:
     def _unlock_secret(self, secret_id: str, source: str) -> None:
         if any(item.id == secret_id for item in self.world.player.journal):
             return
-        secrets = {
-            "secret-sisters": ("同一锅汤", "莫莫总说自己不饿。利利知道，那只是姐姐不愿承认仍有人在等她回桌边。"),
-            "secret-keepsake": ("从不出售的旧物", "拾光最深处的收音机没有电池。莫莫每天擦它，是因为最后一段录音里有人叫过她的名字。"),
-            "secret-first-fix": ("第一件修好的东西", "小柯真正修好的第一件东西不是水泵，而是阿羯塔上那盏劫后熄灭过的灯。"),
-        }
-        title, text = secrets.get(secret_id, ("未命名的碎片", "这段记忆还没有被完整说出来。"))
+        secret = get_secret(secret_id)
+        if not secret:
+            return
         self.world.player.journal.append(JournalSecret(
-            id=secret_id, title=title, text=text, source=source, unlocked_at=self.time_label(),
+            id=secret_id, title=secret["title"], text=secret["text"], source=source, unlocked_at=self.time_label(),
         ))
 
     def _get_quest(self, quest_id: str) -> WishQuest:
@@ -475,6 +538,8 @@ class WorldEngine:
             if len(npc.memory.short_term) < 20:
                 continue
             diary = await self.ai.summarize(npc)
+            if not memory_text_is_safe(diary, self.world):
+                diary = f"这些时辰里，我只记下确实发生的事：{'；'.join(npc.memory.short_term[-3:])[:90]}"
             if diary not in npc.memory.diary:
                 npc.memory.diary = (npc.memory.diary + [f"第{self.world.day}天：{diary}"])[-12:]
             npc.memory.short_term = npc.memory.short_term[-8:]
@@ -485,12 +550,146 @@ class WorldEngine:
         if normalized and normalized not in npc.memory.short_term:
             npc.memory.short_term = (npc.memory.short_term + [normalized])[-20:]
 
+    def _chat_memory(
+        self,
+        npc: NPC,
+        message: str,
+        intents: list[NPCIntent],
+        revealed_secret_id: str | None,
+    ) -> str:
+        """对话只落结构化事实，不把玩家假设或模型台词原样滚入记忆。"""
+
+        prefix = f"{self.time_label()}，外来者在{self._location_name(npc.state.location)}与我交谈。"
+        if unknown_subject(message, self.world):
+            return prefix + "TA 问起一件事实卡里没有记录的事，我明确说不知道，没有把它当成事实。"
+        secret = get_secret(revealed_secret_id or "")
+        if secret:
+            return prefix + f"我按已满足的信任条件讲出了手记「{secret['title']}」。"
+        if intents:
+            verbs = "、".join(intent.verb for intent in intents)
+            return prefix + f"我接受了可执行的约定，已记录为行动队列：{verbs}。"
+        return prefix + "我们聊了此刻的近况；没有把问句或猜测记作已发生的事。"
+
     @staticmethod
     def _increase_affinity(first: NPC, second: NPC) -> None:
         first_relation = first.relationships.setdefault(second.id, Relationship(affinity=20, impression="最近在镇上碰见过。"))
         second_relation = second.relationships.setdefault(first.id, Relationship(affinity=20, impression="最近在镇上碰见过。"))
         first_relation.affinity = min(100, first_relation.affinity + 1)
         second_relation.affinity = min(100, second_relation.affinity + 1)
+
+    def _enqueue_intents(
+        self,
+        npc: NPC,
+        proposed: list[NPCIntent],
+        player_message: str,
+        source: str,
+    ) -> list[NPCIntent]:
+        """只把白名单内且此刻可行的意图入队；非法项按协议静默忽略。"""
+
+        accepted: list[NPCIntent] = []
+        for intent in proposed:
+            if len(accepted) >= 4 or len(npc.state.intent_queue) >= 8:
+                break
+            if not structurally_valid(intent, npc, self.world) or not self._intent_is_feasible(npc, intent):
+                continue
+            queued = QueuedNPCIntent(
+                **intent.model_dump(),
+                player_message=player_message,
+                source=source,
+                enqueued_tick=self.world.tick_index,
+            )
+            npc.state.intent_queue.append(queued)
+            accepted.append(intent.model_copy(deep=True))
+        return accepted
+
+    def _intent_is_feasible(self, npc: NPC, intent: NPCIntent) -> bool:
+        if intent.verb == "none":
+            return False
+        pending_verbs = {item.verb for item in npc.state.intent_queue}
+        if intent.verb == "follow_player":
+            return not npc.state.following_player and "follow_player" not in pending_verbs
+        if intent.verb == "stop_following":
+            return npc.state.following_player or "follow_player" in pending_verbs
+        if intent.verb == "goto":
+            return intent.args["location"] != npc.state.location
+        if intent.verb in {"visit", "relay"}:
+            if intent.args["npc"] == npc.id:
+                return False
+            hour = self.world.minute // 60
+            is_sleeping_at_night = npc.state.action.type == "rest" and (hour >= 22 or hour < 5)
+            return not is_sleeping_at_night
+        return intent.verb == "do"
+
+    def _pop_next_intent(self, npc: NPC) -> QueuedNPCIntent | None:
+        while npc.state.intent_queue:
+            intent = npc.state.intent_queue.pop(0)
+            if structurally_valid(intent, npc, self.world) and self._intent_is_feasible(npc, intent):
+                return intent
+        return None
+
+    def _decision_for_intent(
+        self,
+        npc: NPC,
+        intent: QueuedNPCIntent,
+    ) -> tuple[Decision, str, list[str]]:
+        quote = intent.player_message.strip().replace("\n", " ")[:42]
+        because = intent.because.strip()[:48]
+        reason = f"因为你刚才说“{quote}”，{because or '我愿意照这个约定行动。'}"[:120]
+        participants = [npc.id]
+
+        if intent.verb == "follow_player":
+            npc.state.following_player = True
+            npc.state.following_source = intent.source
+            npc.state.following_reason = reason
+            decision = Decision(action="visit", target=self.world.player.location, say="我跟上。", reason=reason)
+            narrative = f"{self._period()}，{npc.profile.name}答应你的邀请，开始与你同行。"
+        elif intent.verb == "stop_following":
+            npc.state.following_player = False
+            npc.state.following_reason = ""
+            decision = Decision(action="idle", say="我就在这里。", reason=reason)
+            narrative = f"{self._period()}，{npc.profile.name}听懂你的意思，在{self._location_name(npc.state.location)}停下脚步。"
+        elif intent.verb == "goto":
+            location_id = intent.args["location"]
+            decision = Decision(action="move", target=location_id, say="我这就去。", reason=reason)
+            narrative = f"{self._period()}，{npc.profile.name}因为你的话，动身去{self._location_name(location_id)}。"
+        elif intent.verb == "do":
+            action_id = intent.args["action"]
+            activity = next((item for item in npc.profile.activities if item.id == action_id), None)
+            if activity:
+                decision = Decision(
+                    action="activity", target=activity.location, activity_id=activity.id,
+                    say="我来处理。", reason=reason,
+                )
+                narrative = f"{self._period()}，{npc.profile.name}应你的请求，开始{activity.label}。"
+            else:
+                common = {
+                    "eat": ("eat", "greenhouse", "去温室食堂吃点东西"),
+                    "rest": ("rest", npc.state.location, "停下来休息"),
+                    "observe": ("observe", "square", "去水潭边看看"),
+                }
+                action_type, target, label = common[action_id]
+                decision = Decision(action=action_type, target=target, say="好。", reason=reason)
+                narrative = f"{self._period()}，{npc.profile.name}应你的请求，{label}。"
+        else:
+            target = self.get_npc(intent.args["npc"])
+            decision = Decision(
+                action="visit", target=target.id,
+                say="我替你捎过去。" if intent.verb == "relay" else "我去看看。",
+                reason=reason,
+            )
+            participants.append(target.id)
+            if intent.verb == "relay":
+                relayed = intent.args["text"]
+                fact = (
+                    f"{self.time_label()}，{npc.profile.name}在{self._location_name(target.state.location)}"
+                    f"替外来者转告{target.profile.name}：“{relayed}”"
+                )
+                self._remember(target, fact)
+                narrative = f"{self._period()}，{npc.profile.name}去找{target.profile.name}，替你转告：“{relayed}”"
+            else:
+                narrative = f"{self._period()}，{npc.profile.name}因为你的话，去找{target.profile.name}。"
+
+        return decision, narrative, participants
 
     def _complete_plan_item(self, npc: NPC) -> None:
         action = npc.state.action
@@ -581,4 +780,4 @@ class WorldEngine:
 
     def _touch_and_persist(self) -> None:
         self.world.updated_at = datetime.now(timezone.utc).isoformat()
-        self.store.save_current(self.world)
+        self.store.save_current(self.world, self.world_id)

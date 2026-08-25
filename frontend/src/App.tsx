@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type Health, type World } from "./api";
+import { api, rememberWorldId, type SaveInfo, type SessionInfo, type World } from "./api";
 import { ArchivePanel } from "./ArchivePanel";
 import { DataMode } from "./DataMode";
 import { DialogueOverlay, type DialogueLine } from "./DialogueOverlay";
-import { BoardComposer, NotebookPanel, ObserverPanel, PlayerDock } from "./PlayerPanels";
+import { BoardComposer, NotebookPanel, PlayerDock } from "./PlayerPanels";
+import { SaveManager, TitleScreen } from "./SaveManager";
 import { TownStage, type StageCallbacks } from "./TownStage";
 
 function timeText(world: World) {
@@ -21,7 +22,9 @@ function phaseText(minute: number) {
 
 export default function App() {
   const [world, setWorld] = useState<World | null>(null);
-  const [health, setHealth] = useState<Health | null>(null);
+  const [session, setSession] = useState<SessionInfo | null>(null);
+  const [entered, setEntered] = useState(false);
+  const [saves, setSaves] = useState<SaveInfo[]>([]);
   const [archiveId, setArchiveId] = useState<string | null>(null);
   const [dialogueId, setDialogueId] = useState<string | null>(null);
   const [nearbyNpcId, setNearbyNpcId] = useState<string | null>(null);
@@ -35,12 +38,21 @@ export default function App() {
   const [dialogues, setDialogues] = useState<Record<string, DialogueLine[]>>({});
 
   const refresh = useCallback(async () => {
-    const [nextWorld, nextHealth] = await Promise.all([api.world(), api.health()]);
+    const [nextWorld, nextSession] = await Promise.all([api.world(), api.session()]);
     setWorld(nextWorld);
-    setHealth(nextHealth);
+    setSession(nextSession);
+    rememberWorldId(nextSession.world_id);
   }, []);
 
   useEffect(() => {
+    api.session().then((nextSession) => {
+      setSession(nextSession);
+      rememberWorldId(nextSession.world_id);
+    }).catch((reason) => setError(reason.message));
+  }, []);
+
+  useEffect(() => {
+    if (!entered) return;
     refresh().catch((reason) => setError(reason.message));
     const events = new EventSource("/api/events");
     let refreshTimer: number | undefined;
@@ -61,12 +73,19 @@ export default function App() {
       } catch { /* 保持世界轮询可用 */ }
       scheduleWorldRefresh();
     });
+    events.addEventListener("session", (event) => {
+      try {
+        const update = JSON.parse((event as MessageEvent).data);
+        setSession((current) => current ? { ...current, access_mode: update.access_mode } : current);
+        if (update.access_mode === "interactive") setBanner("小镇为你的世界腾出了位置，现在可以继续行动。");
+      } catch { /* 等待下一次心跳 */ }
+    });
     return () => {
       events.close();
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
       if (bannerTimer !== undefined) window.clearTimeout(bannerTimer);
     };
-  }, [refresh]);
+  }, [entered, refresh]);
 
   const archiveNpc = useMemo(() => world?.npcs.find((npc) => npc.id === archiveId), [world, archiveId]);
   const dialogueNpc = useMemo(() => world?.npcs.find((npc) => npc.id === dialogueId), [world, dialogueId]);
@@ -86,6 +105,76 @@ export default function App() {
       setBusy("");
     }
   }, [refresh]);
+
+  async function enterJourney(name: string) {
+    setBusy("正在唤醒小镇");
+    setError("");
+    try {
+      const nextWorld = await api.startSession(name);
+      const nextSession = await api.session();
+      rememberWorldId(nextSession.world_id);
+      setWorld(nextWorld);
+      setSession(nextSession);
+      setEntered(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "旅签没有得到回应");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function restartJourney(name: string) {
+    setBusy("正在重建世界");
+    setError("");
+    try {
+      const nextSession = await api.restartSession(name);
+      rememberWorldId(nextSession.world_id);
+      setSession(nextSession);
+      const nextWorld = await api.world();
+      setWorld(nextWorld);
+      setDialogues({});
+      setEntered(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "没能重新点亮这个世界");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function openSaveManager() {
+    setObserverOpen(true);
+    try {
+      setSaves((await api.saves()).saves);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "没能打开存档匣");
+    }
+  }
+
+  function refreshSaves() {
+    api.saves().then((result) => setSaves(result.saves)).catch(() => undefined);
+  }
+
+  function exportWorld() {
+    void run("世界副本已经导出", async () => {
+      const blob = await api.exportWorld();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `inconewt-${world?.player.name ?? "traveller"}-day-${world?.day ?? 1}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      return {};
+    });
+  }
+
+  function importWorld(file: File) {
+    void run("世界副本已经还原", async () => {
+      let bundle: unknown;
+      try { bundle = JSON.parse(await file.text()); }
+      catch { throw new Error("这不是有效的 JSON 存档文件"); }
+      return api.importWorld(bundle);
+    });
+  }
 
   const stageCallbacks = useMemo<StageCallbacks>(() => ({
     onResidentClick: (npcId) => { setArchiveId(npcId); setDataMode(false); },
@@ -128,9 +217,12 @@ export default function App() {
         if (response.fallbackReason) lines.push({ from: "system", text: response.fallbackReason });
         if (response.affinityDelta) lines.push({ from: "system", text: `关系变化 +${response.affinityDelta} · ${response.impression ?? "TA 对你有了新的印象"}` });
         if (response.completedQuestId) lines.push({ from: "system", text: "心愿完成，新的记忆已经写进手记。" });
+        if (response.revealedSecretId) lines.push({ from: "system", text: "一段经过确认的旧事已收进小镇手记。" });
         return { ...current, [npcId]: lines };
       });
-      setWorld(await api.world());
+      const [nextWorld, nextSession] = await Promise.all([api.world(), api.session()]);
+      setWorld(nextWorld);
+      setSession(nextSession);
     } catch (reason) {
       setDialogues((current) => ({
         ...current,
@@ -141,9 +233,11 @@ export default function App() {
     }
   }
 
-  if (!world) {
+  if (!session) {
     return <main className="loading-screen"><div className="newt-sigil">≈</div><h1>INCONNEWT</h1><p>{error || "正在等新螈镇醒来……"}</p></main>;
   }
+  if (!entered) return <TitleScreen session={session} busy={Boolean(busy)} error={error} onEnter={enterJourney} onRestart={restartJourney} />;
+  if (!world) return <main className="loading-screen"><div className="newt-sigil">≈</div><h1>INCONNEWT</h1><p>{error || "正在唤醒你的新螈镇……"}</p></main>;
 
   const dialogueLocation = dialogueNpc ? world.locations.find((item) => item.id === dialogueNpc.state.location) : null;
   const presentNames = dialogueNpc ? world.npcs.filter((item) => item.id !== dialogueNpc.id && item.state.location === dialogueNpc.state.location).map((item) => item.profile.name) : [];
@@ -152,7 +246,7 @@ export default function App() {
     : "";
 
   return (
-    <main className={`game-shell weather-${world.weather} ${dialogueNpc ? "dialogue-open" : ""}`}>
+    <main className={`game-shell weather-${world.weather} ${dialogueNpc ? "dialogue-open" : ""} ${session.access_mode === "observer" ? "observer-world" : ""}`}>
       <TownStage world={world} callbacks={stageCallbacks} />
 
       <section className="hud-world">
@@ -161,11 +255,12 @@ export default function App() {
       </section>
 
       <section className="hud-system">
-        <span className={`ai-chip ${health?.ai_mode ?? "mock"}`}><i />{health?.ai_mode === "deepseek" ? "DEEPSEEK V4" : "MOCK WORLD"}</span>
+        <span className={`ai-chip ${session.ai_mode}`} title={`今日 AI 调用 ${session.ai_calls_today}/${session.ai_daily_limit}`}><i />{session.ai_budget_exhausted ? "AI 额度已满 · MOCK" : session.ai_mode === "deepseek" ? "DEEPSEEK V4" : "MOCK WORLD"}</span>
         <button className={dataMode ? "active" : ""} onClick={() => setDataMode(true)}>数据模式</button>
       </section>
 
       <div className="announcement-ribbon"><b>公告板</b><span>{world.announcement}</span></div>
+      {session.access_mode === "observer" && <div className="observer-queue"><b>观察模式</b><span>活跃世界已满；此世界暂时冻结，有空位后会自动接入。</span></div>}
       {(banner || error) && <div className={`event-banner ${error ? "error" : ""}`}><small>TOWN EVENT</small><p>{error || banner}</p></div>}
 
       <section className="story-feed">
@@ -177,13 +272,13 @@ export default function App() {
         world={world}
         nearbyNpc={nearbyNpcId}
         onNotebook={setNotebookTab}
-        onObserver={() => setObserverOpen(true)}
+        onObserver={() => void openSaveManager()}
         onAppearance={(appearance) => void run("换好了适合赶路的衣服", () => api.setAppearance(appearance))}
         onBoard={() => setBoardOpen(true)}
         onWish={(weather) => void run(weather === "雾" ? "水面升起一层薄雾" : "日光重新落回水潭", () => api.wishWeather(weather))}
       />
 
-      <div className="version-mark">WORLD v0.3.0 · TICK {world.tick_index}</div>
+      <div className="version-mark">WORLD v0.3.3 · TICK {world.tick_index}</div>
       {archiveNpc && !dialogueNpc && (
         <ArchivePanel
           npc={archiveNpc}
@@ -197,7 +292,18 @@ export default function App() {
         />
       )}
       {dataMode && <DataMode world={world} onClose={() => setDataMode(false)} />}
-      {observerOpen && <ObserverPanel busy={Boolean(busy)} onClose={() => setObserverOpen(false)} onSave={() => void run("世界已存档", api.save)} onLoad={() => void run("已恢复最近存档", api.load)} onTick={() => void run("世界向前走了一刻", api.tick)} onWeather={(weather) => void run(`观察者将天气改为${weather}`, () => api.worldAction("weather", weather))} />}
+      {observerOpen && <SaveManager
+        saves={saves}
+        session={session}
+        busy={Boolean(busy)}
+        onClose={() => setObserverOpen(false)}
+        onSave={(slot) => void run(`世界已保存到槽位 ${slot}`, async () => { const result = await api.save(slot); refreshSaves(); return result; })}
+        onLoad={(slot, kind) => void run("已恢复所选存档", () => api.load(slot, kind))}
+        onExport={exportWorld}
+        onImport={importWorld}
+        onTick={() => void run("世界向前走了一刻", api.tick)}
+        onWeather={(weather) => void run(`观察者将天气改为${weather}`, () => api.worldAction("weather", weather))}
+      />}
       {notebookTab && <NotebookPanel world={world} initialTab={notebookTab} onClose={() => setNotebookTab(null)} onAccept={(questId) => void run("心愿已经记进手记", () => api.acceptQuest(questId))} />}
       {boardOpen && <BoardComposer onClose={() => setBoardOpen(false)} onSubmit={(text) => { setBoardOpen(false); void run("你的字留在了公告板上", () => api.postBoard(text)); }} />}
       {dialogueNpc && (
@@ -206,7 +312,9 @@ export default function App() {
           lines={dialogues[dialogueNpc.id] ?? []}
           busy={busy === "对话生成中"}
           context={dialogueContext}
-          impression={world.player.relationships[dialogueNpc.id]?.impression ?? "仍是陌生人。"}
+          locationName={dialogueLocation?.name ?? "镇上的旧路"}
+          affinity={world.player.relationships[dialogueNpc.id]?.affinity ?? 0}
+          activeWish={world.quests.find((quest) => quest.giver_id === dialogueNpc.id && quest.status !== "completed")}
           onClose={() => setDialogueId(null)}
           onSend={sendDialogue}
         />

@@ -18,6 +18,9 @@ frontend/vite.config.d.ts
 
 # 运行时数据
 data/
+!backend/app/data/
+!backend/app/data/npc_intents.json
+!backend/app/data/canon.json
 *.db
 *.sqlite3
 
