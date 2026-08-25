@@ -9,6 +9,8 @@ services:
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
       TICK_SECONDS: ${TICK_SECONDS:-30}
       DATABASE_PATH: /app/data/inconnewt.db
+      MAX_ACTIVE_WORLDS: ${MAX_ACTIVE_WORLDS:-20}
+      AI_DAILY_CALL_LIMIT: ${AI_DAILY_CALL_LIMIT:-120}
     volumes:
       - inconnewt-data:/app/data
 
