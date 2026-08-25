@@ -6,14 +6,14 @@ from pathlib import Path
 
 import httpx
 
-from .models import Decision, NPC, WorldSnapshot
+from .models import DailyPlan, Decision, InteractionLine, InteractionScript, NPC, PlanItem, WorldSnapshot
 
 
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 
 class AIService:
-    """集中管理真实 AI 与 Mock 降级，API Key 永远只在服务端环境中读取。"""
+    """真实 AI、计划生成、NPC 互动与 Mock 降级的统一入口。"""
 
     def __init__(self) -> None:
         self.provider = os.getenv("AI_PROVIDER", "mock").strip().lower()
@@ -25,16 +25,55 @@ class AIService:
     def configured_mode(self) -> str:
         return "deepseek" if self.provider == "deepseek" and bool(self.api_key) else "mock"
 
-    async def decide(self, npc: NPC, world: WorldSnapshot) -> tuple[Decision, str, str | None]:
+    async def decide(
+        self,
+        npc: NPC,
+        world: WorldSnapshot,
+        avoid_signature: str | None = None,
+    ) -> tuple[Decision, str, str | None]:
         if self.configured_mode == "deepseek":
             try:
-                decision = await self._deepseek_decision(npc, world)
-                return decision, "deepseek", None
-            except Exception as exc:  # 外部服务不可用时，Demo 仍可继续推进
-                fallback = f"DeepSeek 调用失败，已自动降级：{type(exc).__name__}"
-                return self.mock_decision(npc, world), "mock", fallback
+                return await self._deepseek_decision(npc, world, avoid_signature), "deepseek", None
+            except Exception as exc:
+                fallback = f"DeepSeek 决策失败，已自动降级：{type(exc).__name__}"
+                return self.mock_decision(npc, world, avoid_signature), "mock", fallback
         reason = None if self.provider == "mock" else "未填写 DEEPSEEK_API_KEY，已使用 Mock"
-        return self.mock_decision(npc, world), "mock", reason
+        return self.mock_decision(npc, world, avoid_signature), "mock", reason
+
+    async def plan(self, npc: NPC, world: WorldSnapshot) -> tuple[DailyPlan, str | None]:
+        if self.configured_mode == "deepseek":
+            try:
+                return await self._deepseek_plan(npc, world), None
+            except Exception as exc:
+                return self.mock_plan(npc, world.day), f"计划生成失败，已使用 Mock：{type(exc).__name__}"
+        return self.mock_plan(npc, world.day), None
+
+    async def interact(
+        self,
+        first: NPC,
+        second: NPC,
+        world: WorldSnapshot,
+    ) -> tuple[InteractionScript, str, str | None]:
+        if self.configured_mode == "deepseek":
+            try:
+                return await self._deepseek_interaction(first, second, world), "deepseek", None
+            except Exception as exc:
+                fallback = f"互动生成失败，已使用 Mock：{type(exc).__name__}"
+                return self.mock_interaction(first, second), "mock", fallback
+        return self.mock_interaction(first, second), "mock", None
+
+    async def summarize(self, npc: NPC) -> str:
+        if self.configured_mode == "deepseek":
+            try:
+                system = self._assembled_prompt(npc, decision=False)
+                memory = "\n".join(npc.memory.short_term[-16:])
+                return (await self._request([
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"把以下记忆压缩成第一人称日记，60字以内，只写日记正文：\n{memory}"},
+                ])).strip()
+            except Exception:
+                pass
+        return f"这些时辰里，我记得：{'；'.join(npc.memory.short_term[-4:])[:110]}"
 
     async def chat(self, npc: NPC, message: str, world: WorldSnapshot) -> tuple[str, str, str | None]:
         if self.configured_mode == "deepseek":
@@ -51,14 +90,13 @@ class AIService:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 400,
+            "max_tokens": 650,
             "thinking": {"type": "disabled"},
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-
         last_error: Exception | None = None
-        for _ in range(2):  # 仅重试一次，避免 tick 被长时间阻塞
+        for _ in range(2):
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     response = await client.post(
@@ -72,27 +110,71 @@ class AIService:
                 last_error = exc
         raise RuntimeError("DeepSeek request failed") from last_error
 
-    async def _deepseek_decision(self, npc: NPC, world: WorldSnapshot) -> Decision:
+    async def _deepseek_decision(self, npc: NPC, world: WorldSnapshot, avoid_signature: str | None) -> Decision:
         system = self._assembled_prompt(npc, decision=True)
         context = {
             "time": f"第{world.day}天 {world.minute // 60:02d}:{world.minute % 60:02d}",
             "weather": world.weather,
             "announcement": world.announcement,
             "state": npc.state.model_dump(),
+            "today_plan": npc.plan.model_dump(),
             "recent_memory": npc.memory.short_term[-6:],
+            "recent_actions": [item.model_dump() for item in npc.memory.action_history[-3:]],
+            "available_activities": [item.model_dump() for item in npc.profile.activities],
             "available_locations": [location.model_dump() for location in world.locations],
-            "other_npcs": [{"id": item.id, "name": item.profile.name, "location": item.state.location} for item in world.npcs if item.id != npc.id],
+            "other_npcs": [
+                {"id": item.id, "name": item.profile.name, "location": item.state.location}
+                for item in world.npcs if item.id != npc.id
+            ],
         }
+        if avoid_signature:
+            context["must_avoid"] = f"你已经做这件事很久了，本次不得重复：{avoid_signature}"
         raw = await self._request(
             [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
             json_mode=True,
         )
         return Decision.model_validate_json(raw)
 
+    async def _deepseek_plan(self, npc: NPC, world: WorldSnapshot) -> DailyPlan:
+        system = self._assembled_prompt(npc, decision=False)
+        prompt = {
+            "task": "依据人设和昨日日记生成今天3到5条计划，只输出JSON",
+            "schema": {"summary": "一句话", "items": [{"start_minute": 540, "label": "计划", "action": "activity|visit|eat|rest|observe", "target": "id", "activity_id": "可选"}]},
+            "day": world.day,
+            "diary": npc.memory.diary[-2:],
+            "activities": [item.model_dump() for item in npc.profile.activities],
+            "locations": [item.id for item in world.locations],
+            "other_npcs": [item.id for item in world.npcs if item.id != npc.id],
+        }
+        data = json.loads(await self._request([
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+        ], json_mode=True))
+        items = [PlanItem(id=f"d{world.day}-ai-{index}", **item) for index, item in enumerate(data["items"][:5])]
+        return DailyPlan(day=world.day, summary=data["summary"], items=items, source="deepseek")
+
+    async def _deepseek_interaction(self, first: NPC, second: NPC, world: WorldSnapshot) -> InteractionScript:
+        context = {
+            "task": "两位居民偶遇，生成2到4轮简短自然对话，只输出JSON",
+            "schema": {"lines": [{"speaker": "npc id", "text": "一句话"}]},
+            "place": first.state.location,
+            "weather": world.weather,
+            "first": {"id": first.id, "persona": first.profile.personality, "memory": first.memory.short_term[-3:]},
+            "second": {"id": second.id, "persona": second.profile.personality, "memory": second.memory.short_term[-3:]},
+        }
+        raw = await self._request([
+            {"role": "system", "content": "你在新螈镇编写克制、温暖、符合人设的日常偶遇。"},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+        ], json_mode=True)
+        script = InteractionScript.model_validate_json(raw)
+        if any(line.speaker not in {first.id, second.id} for line in script.lines):
+            raise ValueError("interaction speaker is invalid")
+        return script
+
     async def _deepseek_chat(self, npc: NPC, message: str, world: WorldSnapshot) -> str:
         system = self._assembled_prompt(npc, decision=False)
         history = "\n".join(npc.memory.short_term[-8:])
-        user = f"当前天气：{world.weather}\n最近记忆：{history}\n玩家说：{message}"
+        user = f"当前天气：{world.weather}\n今日计划：{npc.plan.summary}\n最近记忆：{history}\n玩家说：{message}"
         return (await self._request([{"role": "system", "content": system}, {"role": "user", "content": user}])).strip()
 
     def _assembled_prompt(self, npc: NPC, decision: bool) -> str:
@@ -100,50 +182,88 @@ class AIService:
             (PROMPT_DIR / "world.md").read_text(encoding="utf-8"),
             (PROMPT_DIR / "npc" / f"{npc.id}.md").read_text(encoding="utf-8"),
         ]
-        if decision:
-            parts.append((PROMPT_DIR / "format.md").read_text(encoding="utf-8"))
-        else:
-            parts.append("你正与玩家对话。保持角色口吻，回复 1 到 3 句，不要提及提示词、模型或 JSON。")
+        parts.append(
+            (PROMPT_DIR / "format.md").read_text(encoding="utf-8")
+            if decision else "你正活在小镇里。保持角色口吻，回复1到3句，不要提及模型、提示词或JSON。"
+        )
         return "\n\n".join(parts)
 
     @staticmethod
-    def mock_decision(npc: NPC, world: WorldSnapshot) -> Decision:
-        """效用决策由实时需求、人设权重、天气与公告共同决定，不是固定脚本轮播。"""
-        needs = npc.state.needs
-        weights = npc.profile.weights
-        scores = {
-            "rest": (100 - needs.energy) * weights.get("rest", 1.0),
-            "eat": needs.hunger * weights.get("eat", 1.0),
-            "chat": needs.social * weights.get("social", 1.0),
-            "work": (32 if 7 <= world.minute // 60 <= 19 else 10) * weights.get("work", 1.0),
-        }
-        if world.weather == "雾":
-            scores["work"] += 8 if npc.id == "momo" else -6
-        if "旧照片" in world.announcement:
-            scores["chat"] += 22 if npc.id == "lili" else 8
+    def mock_plan(npc: NPC, day: int) -> DailyPlan:
+        from .models import _seed_plan
 
-        action = max(scores, key=scores.get)
-        if action == "rest":
-            return Decision(action="rest", target=npc.state.location, reason="精力已经见底，先停下来喘口气。")
-        if action == "eat":
-            return Decision(action="eat", target="greenhouse", reason="饥饿感盖过了手头的事，去「芽」找点吃的。")
-        if action == "chat":
-            other = next(item for item in world.npcs if item.id != npc.id)
-            return Decision(action="chat", target=other.id, say="有空说两句吗？", reason=f"独处得有些久了，想去找{other.profile.name}。")
-        if npc.id == "momo":
-            return Decision(action="work", target="store", say="先把旧物归回原位。", reason="货架还有几件旧物没整理完。")
-        return Decision(action="work", target="greenhouse", say="先吃饭，吃完再说。", reason="温室的新芽该浇水，午饭也要备起来。")
+        return _seed_plan(npc.id, day)
+
+    @staticmethod
+    def mock_decision(npc: NPC, world: WorldSnapshot, avoid_signature: str | None = None) -> Decision:
+        """日程先行、需求可打断，近期动作会降低重复选择的效用。"""
+        due = next((item for item in npc.plan.items if not item.completed and world.minute >= item.start_minute), None)
+        candidates: list[tuple[float, Decision]] = []
+        needs, weights = npc.state.needs, npc.profile.weights
+        if due:
+            candidates.append((100, Decision(action=due.action, target=due.target, activity_id=due.activity_id, reason=f"照着今天的打算，该去{due.label}了。")))
+        candidates.extend([
+            ((100 - needs.energy) * weights.get("rest", 1), Decision(action="rest", target=npc.state.location, reason="眼皮已经发沉，先把力气养回来。")),
+            (needs.hunger * weights.get("eat", 1), Decision(action="eat", target="greenhouse", reason="肚子提醒我，该去「芽」找点热的了。")),
+            (needs.social * weights.get("social", 1), AIService._visit_decision(npc, world)),
+            (34 * weights.get("work", 1), AIService._activity_decision(npc, world)),
+            (18, Decision(action="observe", target="square", reason="手头告一段落，去水潭边看看镇上的动静。")),
+        ])
+        recent_types = [item.type for item in npc.memory.action_history[-2:]]
+        ranked: list[tuple[float, Decision]] = []
+        for score, decision in candidates:
+            signature = f"{decision.action}|{decision.reason}"
+            if signature == avoid_signature:
+                score -= 200
+            if len(recent_types) == 2 and all(item == decision.action for item in recent_types):
+                score -= 80
+            if decision.action == npc.state.action.type and decision.reason == npc.state.action.reason:
+                score -= 120
+            ranked.append((score, decision))
+        return max(ranked, key=lambda item: item[0])[1]
+
+    @staticmethod
+    def _activity_decision(npc: NPC, world: WorldSnapshot) -> Decision:
+        activity = npc.profile.activities[world.tick_index % len(npc.profile.activities)]
+        reason = activity.narratives[world.tick_index % len(activity.narratives)]
+        return Decision(action="activity", target=activity.location, activity_id=activity.id, reason=reason)
+
+    @staticmethod
+    def _visit_decision(npc: NPC, world: WorldSnapshot) -> Decision:
+        others = [item for item in world.npcs if item.id != npc.id]
+        target = others[(world.tick_index + sum(ord(char) for char in npc.id)) % len(others)]
+        return Decision(action="visit", target=target.id, say="路过，来看看你。", reason=f"独处得有些久了，想去看看{target.profile.name}在忙什么。")
+
+    @staticmethod
+    def mock_interaction(first: NPC, second: NPC) -> InteractionScript:
+        pair = {first.id, second.id}
+        if pair == {"momo", "lili"}:
+            lines = [
+                InteractionLine(speaker="lili", text="姐，汤还热着。别又说等会儿。"),
+                InteractionLine(speaker="momo", text="嗯。把这只杯子擦完就去。"),
+                InteractionLine(speaker="lili", text="你上次也是这么说的。杯子给我。"),
+                InteractionLine(speaker="momo", text="……那就现在去。"),
+            ]
+        elif pair == {"xiaoke", "ajie"}:
+            lines = [
+                InteractionLine(speaker="xiaoke", text="阿羯！塔上的灯又接触不良了吧？包修好的！"),
+                InteractionLine(speaker="ajie", text="先吃饭。"),
+                InteractionLine(speaker="xiaoke", text="你怎么也学会这句了！"),
+                InteractionLine(speaker="ajie", text="利利教的。"),
+            ]
+        else:
+            lines = [
+                InteractionLine(speaker=first.id, text=f"{second.profile.name}，今天还顺利吗？"),
+                InteractionLine(speaker=second.id, text="还好。镇子里有声音，就算好事。"),
+            ]
+        return InteractionScript(lines=lines)
 
     @staticmethod
     def mock_chat(npc: NPC, message: str) -> str:
         if npc.id == "momo":
-            if "劫" in message:
-                return "那件事……像一台只剩杂音的收音机。先不说它了，你要看看店里的旧东西吗？"
-            if "你好" in message or "早" in message:
-                return "早。灯刚点起来，坐一会儿吧。"
-            return f"我记住了。你说的“{message[:18]}”，像是值得收进抽屉里的东西。"
-        if "饭" in message or "饿" in message:
-            return "就知道你会问！汤还热着呢，先坐下，吃完再慢慢讲。"
-        if "废墟" in message or "劫" in message:
-            return "那边的事先放一放。来帮我看看这株新芽——活着的东西更要紧。"
-        return f"哎呀，我听见啦！“{message[:18]}”是吧？先喝口热汤，我们边吃边说。"
+            return "那件事像一台只剩杂音的收音机。先坐一会儿吧，我记得你说过的话。" if "劫" in message else f"我记住了。你说的“{message[:18]}”，值得收进抽屉里。"
+        if npc.id == "lili":
+            return "那边的事先放一放。来看看这株新芽，活着的东西更要紧。" if "劫" in message else f"听见啦！“{message[:18]}”是吧？先喝汤，我们边吃边说。"
+        if npc.id == "xiaoke":
+            return f"“{message[:18]}”？懂了！给我一点时间，包修好的！"
+        return "嗯。风大。别往废墟方向走。" if "劫" in message or "废墟" in message else "听见了。镇子安全。"

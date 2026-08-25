@@ -1,169 +1,37 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { api, Health, NPC, World } from "./api";
-
-type ChatLine = { from: "player" | "npc" | "system"; text: string };
-
-const locationSymbols: Record<string, string> = {
-  store: "旧",
-  greenhouse: "芽",
-  square: "水",
-};
-
-const actionNames: Record<string, string> = {
-  work: "忙手头的事",
-  rest: "休息",
-  eat: "吃东西",
-  chat: "找人聊天",
-  move: "前往别处",
-  observe: "观察",
-  idle: "发呆",
-};
+import { useEffect, useMemo, useState } from "react";
+import { api, type Health, type World } from "./api";
+import { ArchivePanel } from "./ArchivePanel";
+import { DataMode } from "./DataMode";
+import { DialogueOverlay, type DialogueLine } from "./DialogueOverlay";
+import { TownStage } from "./TownStage";
 
 function timeText(world: World) {
   const hour = Math.floor(world.minute / 60).toString().padStart(2, "0");
-  const minute = (world.minute % 60).toString().padStart(2, "0");
-  return `第 ${world.day} 天 · ${hour}:${minute}`;
+  return `第 ${world.day} 天 / ${hour}:00`;
 }
 
-function NeedBar({ label, value, inverse = false }: { label: string; value: number; inverse?: boolean }) {
-  const display = inverse ? 100 - value : value;
-  return (
-    <div className="need-row">
-      <span>{label}</span>
-      <div className="need-track" aria-label={`${label} ${display}%`}>
-        <i style={{ width: `${display}%` }} />
-      </div>
-      <b>{display}</b>
-    </div>
-  );
+function phaseText(minute: number) {
+  const hour = minute / 60;
+  if (hour < 6 || hour >= 20) return "夜色压蓝";
+  if (hour >= 18) return "篝火初亮";
+  if (hour < 9) return "清晨薄光";
+  return "日光漫过屋脊";
 }
 
-function TownMap({ world, selectedId, onSelect }: { world: World; selectedId: string; onSelect: (id: string) => void }) {
-  return (
-    <section className="town-map" aria-label="新螈镇地图">
-      <div className="map-caption">
-        <span>NEW(T) TOWN / OBSERVATION MAP</span>
-        <small>点击居民查看她此刻为何行动</small>
-      </div>
-      <div className="water-lines" />
-      {world.locations.map((location) => (
-        <article key={location.id} className={`location location-${location.id}`}>
-          <div className="location-symbol">{locationSymbols[location.id]}</div>
-          <div>
-            <h2>{location.name}</h2>
-            <p>{location.description}</p>
-          </div>
-          <div className="npc-markers">
-            {world.npcs
-              .filter((npc) => npc.state.location === location.id)
-              .map((npc) => (
-                <button
-                  className={`npc-marker ${selectedId === npc.id ? "selected" : ""}`}
-                  key={npc.id}
-                  style={{ "--npc-color": npc.profile.color } as React.CSSProperties}
-                  onClick={() => onSelect(npc.id)}
-                >
-                  <span className="npc-figure" aria-hidden="true"><i /></span>
-                  <span>
-                    <b>{npc.profile.name}</b>
-                    <small>{actionNames[npc.state.action.type] ?? npc.state.action.type}</small>
-                  </span>
-                </button>
-              ))}
-          </div>
-        </article>
-      ))}
-      <div className="map-note">劫后第十年<br />水潭里的蝾螈又多了一只</div>
-    </section>
-  );
-}
-
-function NPCPanel({ npc, onChat }: { npc: NPC; onChat: () => void }) {
-  const memories = [...npc.memory.short_term].reverse().slice(0, 4);
-  return (
-    <aside className="npc-panel">
-      <div className="panel-kicker">RESIDENT FILE / {npc.id.toUpperCase()}</div>
-      <header className="npc-heading">
-        <span className="portrait" style={{ "--npc-color": npc.profile.color } as React.CSSProperties}>{npc.profile.name[0]}</span>
-        <div>
-          <h2>{npc.profile.name}</h2>
-          <p>{npc.profile.role}</p>
-        </div>
-        <span className="mood">{npc.state.mood}</span>
-      </header>
-
-      <p className="personality">{npc.profile.personality}</p>
-      <div className="reason-card">
-        <div>
-          <span className={`mode-dot ${npc.state.action.source}`} />
-          此刻的决定 · {npc.state.action.source === "deepseek" ? "DeepSeek" : "Mock"}
-        </div>
-        <strong>“{npc.state.action.reason}”</strong>
-      </div>
-
-      <div className="needs">
-        <NeedBar label="精力" value={npc.state.needs.energy} />
-        <NeedBar label="饱腹" value={npc.state.needs.hunger} inverse />
-        <NeedBar label="陪伴" value={npc.state.needs.social} inverse />
-      </div>
-
-      <div className="memory-block">
-        <div className="section-title"><span>最近记忆</span><small>保留 20 条</small></div>
-        {memories.map((memory, index) => <p key={`${memory}-${index}`}>{memory}</p>)}
-      </div>
-
-      <button className="primary-button" onClick={onChat}>和{npc.profile.name}说话 <span>↗</span></button>
-    </aside>
-  );
-}
-
-function ChatDrawer({ npc, lines, busy, onClose, onSend }: {
-  npc: NPC;
-  lines: ChatLine[];
-  busy: boolean;
-  onClose: () => void;
-  onSend: (message: string) => Promise<void>;
-}) {
-  const [message, setMessage] = useState("");
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const text = message.trim();
-    if (!text || busy) return;
-    setMessage("");
-    await onSend(text);
-  }
-  return (
-    <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="chat-drawer" aria-label={`与${npc.profile.name}对话`}>
-        <header>
-          <div><small>正在交谈</small><h2>{npc.profile.name}</h2></div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭对话">×</button>
-        </header>
-        <div className="chat-lines">
-          {lines.length === 0 && <p className="chat-empty">她正做着自己的事。说点什么吧。</p>}
-          {lines.map((line, index) => (
-            <div key={index} className={`chat-line ${line.from}`}><span>{line.text}</span></div>
-          ))}
-          {busy && <div className="chat-line npc"><span className="typing">正在想……</span></div>}
-        </div>
-        <form onSubmit={submit}>
-          <input value={message} onChange={(event) => setMessage(event.target.value)} maxLength={500} placeholder="问问今天发生了什么……" autoFocus />
-          <button type="submit" disabled={busy || !message.trim()}>发送</button>
-        </form>
-      </section>
-    </div>
-  );
-}
+const giftByNpc: Record<string, string> = {
+  momo: "一枚旧唱片", lili: "一包番茄种子", xiaoke: "一盒旧螺丝", ajie: "一盏备用灯芯",
+};
 
 export default function App() {
   const [world, setWorld] = useState<World | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
-  const [selectedId, setSelectedId] = useState("momo");
-  const [chatting, setChatting] = useState(false);
-  const [chatLines, setChatLines] = useState<Record<string, ChatLine[]>>({});
+  const [archiveId, setArchiveId] = useState<string | null>(null);
+  const [dialogueId, setDialogueId] = useState<string | null>(null);
+  const [dataMode, setDataMode] = useState(false);
   const [busy, setBusy] = useState("");
-  const [notice, setNotice] = useState("");
+  const [banner, setBanner] = useState("");
   const [error, setError] = useState("");
+  const [dialogues, setDialogues] = useState<Record<string, DialogueLine[]>>({});
 
   async function refresh() {
     const [nextWorld, nextHealth] = await Promise.all([api.world(), api.health()]);
@@ -172,100 +40,117 @@ export default function App() {
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(err.message));
-    const stream = new EventSource("/api/events");
-    stream.addEventListener("world", () => api.world().then(setWorld).catch(() => undefined));
-    return () => stream.close();
+    refresh().catch((reason) => setError(reason.message));
+    const events = new EventSource("/api/events");
+    events.addEventListener("world", (event) => {
+      try {
+        const update = JSON.parse((event as MessageEvent).data);
+        setBanner(update.text);
+        window.setTimeout(() => setBanner(""), 3600);
+      } catch { /* 保持世界轮询可用 */ }
+      api.world().then(setWorld).catch(() => undefined);
+    });
+    return () => events.close();
   }, []);
 
-  const selectedNpc = useMemo(
-    () => world?.npcs.find((npc) => npc.id === selectedId) ?? world?.npcs[0],
-    [world, selectedId],
-  );
+  const archiveNpc = useMemo(() => world?.npcs.find((npc) => npc.id === archiveId), [world, archiveId]);
+  const dialogueNpc = useMemo(() => world?.npcs.find((npc) => npc.id === dialogueId), [world, dialogueId]);
 
-  async function run(label: string, action: () => Promise<World | unknown>) {
+  async function run(label: string, operation: () => Promise<World | unknown>) {
     setBusy(label);
     setError("");
     try {
-      const result = await action();
+      const result = await operation();
       if (result && typeof result === "object" && "npcs" in result) setWorld(result as World);
       else await refresh();
-      setNotice(label);
-      window.setTimeout(() => setNotice(""), 2200);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "操作失败");
+      setBanner(label);
+      window.setTimeout(() => setBanner(""), 2800);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "世界没有回应这次操作");
     } finally {
       setBusy("");
     }
   }
 
-  async function sendChat(message: string) {
-    if (!selectedNpc) return;
-    const npcId = selectedNpc.id;
-    setChatLines((current) => ({ ...current, [npcId]: [...(current[npcId] ?? []), { from: "player", text: message }] }));
+  async function sendDialogue(message: string) {
+    if (!dialogueNpc) return;
+    const npcId = dialogueNpc.id;
     setBusy("对话生成中");
+    setDialogues((current) => ({
+      ...current,
+      [npcId]: [...(current[npcId] ?? []), { from: "player", text: message }, { from: "npc", text: "" }],
+    }));
     try {
-      const response = await api.chat(npcId, message);
-      const additions: ChatLine[] = [{ from: "npc", text: response.reply }];
-      if (response.fallback_reason) additions.push({ from: "system", text: response.fallback_reason });
-      setChatLines((current) => ({ ...current, [npcId]: [...(current[npcId] ?? []), ...additions] }));
+      const response = await api.chatStream(npcId, message, (delta) => {
+        setDialogues((current) => {
+          const lines = [...(current[npcId] ?? [])];
+          const last = lines.length - 1;
+          lines[last] = { ...lines[last], text: `${lines[last]?.text ?? ""}${delta}` };
+          return { ...current, [npcId]: lines };
+        });
+      });
+      setDialogues((current) => {
+        const lines = [...(current[npcId] ?? [])];
+        const last = lines.length - 1;
+        lines[last] = { ...lines[last], source: response.source };
+        if (response.fallbackReason) lines.push({ from: "system", text: response.fallbackReason });
+        return { ...current, [npcId]: lines };
+      });
       setWorld(await api.world());
-    } catch (err) {
-      setChatLines((current) => ({
+    } catch (reason) {
+      setDialogues((current) => ({
         ...current,
-        [npcId]: [...(current[npcId] ?? []), { from: "system", text: err instanceof Error ? err.message : "对话失败" }],
+        [npcId]: [...(current[npcId] ?? []), { from: "system", text: reason instanceof Error ? reason.message : "对话中断" }],
       }));
     } finally {
       setBusy("");
     }
   }
 
-  if (!world || !selectedNpc) {
-    return <main className="loading"><div className="newt-loader">≈</div><p>{error || "正在等小镇醒来……"}</p></main>;
+  if (!world) {
+    return <main className="loading-screen"><div className="newt-sigil">≈</div><h1>INCONNEWT</h1><p>{error || "正在等新螈镇醒来……"}</p></main>;
   }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand"><span className="brand-mark">≈</span><div><h1>INCONNEWT</h1><p>新螈镇观察站</p></div></div>
-        <div className="world-status">
-          <span>{timeText(world)}</span><i />
-          <span>{world.weather}</span><i />
-          <span className={`ai-status ${health?.ai_mode ?? "mock"}`}><b />{health?.ai_mode === "deepseek" ? "DEEPSEEK V4" : "MOCK WORLD"}</span>
-        </div>
-        <div className="save-actions">
-          <button onClick={() => run("存档完成", api.save)} disabled={Boolean(busy)}>保存</button>
-          <button onClick={() => run("已恢复存档", api.load)} disabled={Boolean(busy)}>恢复</button>
-        </div>
-      </header>
+    <main className={`game-shell weather-${world.weather} ${dialogueNpc ? "dialogue-open" : ""}`}>
+      <TownStage world={world} onResidentClick={(npcId) => { setArchiveId(npcId); setDataMode(false); }} />
+      <div className="paper-grain" />
 
-      <div className="announcement"><span>公告板</span><p>{world.announcement}</p></div>
-      {(error || notice) && <div className={`toast ${error ? "error" : ""}`}>{error || notice}</div>}
-
-      <div className="main-grid">
-        <TownMap world={world} selectedId={selectedNpc.id} onSelect={setSelectedId} />
-        <NPCPanel npc={selectedNpc} onChat={() => setChatting(true)} />
-      </div>
-
-      <section className="control-deck">
-        <div className="control-heading"><small>GENTLE INTERVENTIONS</small><h2>给世界一点轻微的推动</h2></div>
-        <div className="control-group"><span>天气</span><button onClick={() => run("天气已切换", () => api.worldAction("weather", "晴"))}>放晴</button><button onClick={() => run("雾正在靠近", () => api.worldAction("weather", "雾"))}>起雾</button></div>
-        <div className="control-group"><span>公告</span><button onClick={() => run("旧照片已贴出", () => api.worldAction("announcement", "公告板贴出一张来自劫前的旧照片。"))}>贴旧照片</button></div>
-        <div className="control-group"><span>礼物</span><button onClick={() => run("礼物已送达", () => api.worldAction("gift", selectedNpc.id === "momo" ? "一枚旧唱片" : "一包番茄种子", selectedNpc.id))}>送给{selectedNpc.profile.name}</button></div>
-        <button className="tick-button" onClick={() => run("世界推进了一刻", api.tick)} disabled={Boolean(busy)}><span>{busy || "推进一刻"}</span><b>→</b></button>
+      <section className="hud-world">
+        <div className="brand-lockup"><span className="newt-mark">≈</span><div><h1>INCONNEWT</h1><p>NEW(T) TOWN / LIVE WORLD</p></div></div>
+        <div className="world-clock"><strong>{timeText(world)}</strong><span>{world.weather} · {phaseText(world.minute)}</span></div>
       </section>
 
-      <section className="event-strip">
-        <div className="section-title"><span>镇上刚刚发生</span><small>LIVE / SSE</small></div>
-        <div className="event-list">
-          {world.recent_events.length === 0 && <p className="empty-event">还很安静。推进一刻，看看谁会先动起来。</p>}
-          {world.recent_events.slice(0, 5).map((event) => <article key={event.id}><time>{event.at}</time><p>{event.text}</p></article>)}
-        </div>
+      <section className="hud-system">
+        <span className={`ai-chip ${health?.ai_mode ?? "mock"}`}><i />{health?.ai_mode === "deepseek" ? "DEEPSEEK V4" : "MOCK WORLD"}</span>
+        <button onClick={() => run("世界已存档", api.save)} disabled={Boolean(busy)}>保存</button>
+        <button onClick={() => run("已恢复最近存档", api.load)} disabled={Boolean(busy)}>恢复</button>
+        <button className={dataMode ? "active" : ""} onClick={() => setDataMode(true)}>数据模式</button>
       </section>
 
-      <footer><span>INCONNU × NEWT</span><p>未知之中，也保留再生的能力。</p><small>Demo v0.1.1</small></footer>
+      <div className="announcement-ribbon"><b>公告板</b><span>{world.announcement}</span></div>
+      {(banner || error) && <div className={`event-banner ${error ? "error" : ""}`}><small>TOWN EVENT</small><p>{error || banner}</p></div>}
 
-      {chatting && <ChatDrawer npc={selectedNpc} lines={chatLines[selectedNpc.id] ?? []} busy={busy === "对话生成中"} onClose={() => setChatting(false)} onSend={sendChat} />}
+      <section className="story-feed">
+        <header><span>镇上刚刚发生</span><small>LIVE / SSE</small></header>
+        {world.recent_events.slice(0, 3).map((event) => <article key={event.id} className={event.kind}><time>{event.at}</time><p>{event.text}</p></article>)}
+      </section>
+
+      <section className="god-controls">
+        <div className="control-label"><small>GENTLE INTERVENTIONS</small><strong>轻轻推动世界</strong></div>
+        <div className="control-buttons">
+          <button onClick={() => run("日光重新落回屋顶", () => api.worldAction("weather", "晴"))}><i>☼</i><span>放晴</span></button>
+          <button onClick={() => run("雾从废墟方向漫进小镇", () => api.worldAction("weather", "雾"))}><i>≋</i><span>起雾</span></button>
+          <button onClick={() => run("公告板上的旧照片在风里轻响", () => api.worldAction("announcement", "公告板贴出一张来自劫前的旧照片。"))}><i>▧</i><span>贴旧照片</span></button>
+          <button disabled={!archiveNpc} onClick={() => archiveNpc && run(`礼物已经送到${archiveNpc.profile.name}手里`, () => api.worldAction("gift", giftByNpc[archiveNpc.id], archiveNpc.id))}><i>◇</i><span>{archiveNpc ? `送给${archiveNpc.profile.name}` : "先选居民"}</span></button>
+        </div>
+        <button className="advance-button" onClick={() => run("世界向前走了一刻", api.tick)} disabled={Boolean(busy)}><small>{busy || "NEXT TICK"}</small><strong>推进一刻</strong><b>→</b></button>
+      </section>
+
+      <div className="version-mark">WORLD v0.2.0 · TICK {world.tick_index}</div>
+      {archiveNpc && !dialogueNpc && <ArchivePanel npc={archiveNpc} residents={world.npcs} onClose={() => setArchiveId(null)} onTalk={() => setDialogueId(archiveNpc.id)} />}
+      {dataMode && <DataMode world={world} onClose={() => setDataMode(false)} />}
+      {dialogueNpc && <DialogueOverlay npc={dialogueNpc} lines={dialogues[dialogueNpc.id] ?? []} busy={busy === "对话生成中"} onClose={() => setDialogueId(null)} onSend={sendDialogue} />}
     </main>
   );
 }

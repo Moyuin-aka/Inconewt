@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -38,7 +39,7 @@ async def lifespan(app: FastAPI):
         store.close()
 
 
-app = FastAPI(title="Inconnewt API", version="0.1.1", lifespan=lifespan)
+app = FastAPI(title="Inconnewt API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -81,6 +82,25 @@ async def chat(npc_id: str, request: ChatRequest) -> ChatResponse:
         return await engine().chat(npc_id, request.message)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="NPC 不存在") from exc
+
+
+@app.post("/api/chat/{npc_id}/stream")
+async def chat_stream(npc_id: str, request: ChatRequest) -> StreamingResponse:
+    """AVG 前端使用的 SSE 文本流；Mock 与真实 AI 共享相同演出协议。"""
+    try:
+        response = await engine().chat(npc_id, request.message)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="NPC 不存在") from exc
+
+    async def generate():
+        meta = {"type": "meta", "source": response.source, "fallback_reason": response.fallback_reason}
+        yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
+        for character in response.reply:
+            yield f"data: {json.dumps({'type': 'delta', 'delta': character}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.018)
+        yield 'data: {"type":"done"}\n\n'
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/api/world/actions", response_model=WorldSnapshot)
