@@ -1,0 +1,28 @@
+services:
+  backend:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/moyuin-aka/inconewt}-backend:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      TICK_SECONDS: ${TICK_SECONDS:-30}
+      DATABASE_PATH: /app/data/inconnewt.db
+      MAX_ACTIVE_WORLDS: ${MAX_ACTIVE_WORLDS:-20}
+      AI_DAILY_CALL_LIMIT: ${AI_DAILY_CALL_LIMIT:-120}
+    volumes:
+      - inconnewt-data:/app/data
+
+  web:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/moyuin-aka/inconewt}-web:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  inconnewt-data:

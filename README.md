@@ -20,6 +20,16 @@ docker compose up --build
 docker compose down
 ```
 
+## GHCR 镜像部署
+
+推送到 `main`、推送 `v*` 标签或手动运行 `Publish container images` Action 后，会发布 `inconewt-backend` 与 `inconewt-web` 两个多架构镜像。服务器在**仓库目录**执行一行命令即可拉取并启动：
+
+```sh
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+Compose 会自动拉取 `latest` 镜像并保留 SQLite 数据卷；更新时重复执行同一命令即可。需要锁定版本时加 `IMAGE_TAG=v0.3.3`，私有包则先登录 GHCR。
+
 ## AI 配置
 
 默认无需 API Key。需要启用 DeepSeek 时：
