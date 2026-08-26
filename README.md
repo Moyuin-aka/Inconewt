@@ -2,7 +2,7 @@
 
 Web 版 AI 小镇 Demo。玩家以「外来者」身份走进劫后小镇，四位居民依据人设、需求、日程和记忆自主行动、彼此互动，也会理解玩家的自然语言并据此行动；未配置 AI 时可用 Mock 完整体验。每位访客拥有一个独立世界，服务器托管、支持存档与导出。
 
-技术栈：React、Phaser、FastAPI、SQLite、Docker Compose。
+技术栈：React、Phaser、FastAPI、SQLite、Docker Compose。完整技术方案见 [docs/design.md](docs/design.md)。
 
 角色精灵改编自 [Kenney RPG Urban Pack](https://kenney.nl/assets/rpg-urban-pack)，采用 CC0 许可。
 
